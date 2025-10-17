@@ -1,7 +1,5 @@
 # NarrowMind 🤖
 
-![NarrowMind Banner](https://media.giphy.com/media/3o6ZsX2t0H6pK/giphy.gif)
-
 **NarrowMind** is a **small, context-focused language model chatbot** that combines:
 
 - **GPT intelligence** for natural, fluent responses
@@ -23,8 +21,6 @@
 - **Study Mode** – ingest books/manuals and answer questions
 - **Custom Rules** – enforce tone, structure, or domain behavior
 
-![Workflow GIF](https://media.giphy.com/media/26xBukhHTWz6I/giphy.gif)
-
 ---
 
 ## 📚 How It Works
@@ -34,8 +30,6 @@
 3. **GPT Core** – generates fluent responses
 4. **Markov Chains** – guides word choice and sentence structure
 5. **Rules Engine** – ensures accurate, on-topic replies
-
-![Pipeline GIF](https://media.giphy.com/media/l4KibK3JwaVo0CjDO/giphy.gif)
 
 > Small model + smart context = precise & reliable answers
 
@@ -48,8 +42,6 @@
 - **Domain-specific Chatbots** – technical, legal, medical, niche knowledge
 - **Interactive Guides** – controlled conversational guidance
 
-![Use Cases GIF](https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif)
-
 ---
 
 ## ✨ Why NarrowMind
@@ -61,14 +53,6 @@
 - **Customizable** – tune rules & domain behavior
 - **Small but Smart** – lightweight, context-aware AI
 - **Fast & Efficient** – minimal resources
-
----
-
-## 🔥 Live Demo
-
-![Demo GIF](https://media.giphy.com/media/3o7aD2saalBwwftBIY/giphy.gif)
-
-> “Ask it questions from a textbook, FAQ, or document — it gives precise, context-aware answers”
 
 ---
 
@@ -88,11 +72,3 @@
 ![License Badge](https://img.shields.io/badge/License-MIT-orange)
 
 MIT License © 2025 NarrowMind
-
----
-
-✅ **Optional Enhancements** (for even more interactivity on GitHub):
-
-- Use **hover-over GIFs** or small embedded animations for each feature
-- Include **side-by-side examples** of questions and NarrowMind answers
-- Animated **pipeline diagram** showing GPT + Markov + Rules flow
