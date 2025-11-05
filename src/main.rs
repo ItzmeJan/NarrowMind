@@ -276,7 +276,16 @@ impl LanguageModel {
                         let ngram_prefix = &ngram[..context_len];
                         let query_prefix = &context[context.len().saturating_sub(context_len)..];
                         
-                        if ngram_prefix == query_prefix {
+                        // Compare using base words
+                        let mut matches = true;
+                        for (ngram_token, query_token) in ngram_prefix.iter().zip(query_prefix.iter()) {
+                            if self.extract_word(ngram_token) != self.extract_word(query_token) {
+                                matches = false;
+                                break;
+                            }
+                        }
+                        
+                        if matches {
                             // The word right after the context is our candidate
                             let candidate = ngram[context_len].clone();
                             let count = *self.ngram_counts.get(ngram).unwrap_or(&0);
@@ -365,22 +374,25 @@ impl LanguageModel {
             context = context[context.len().saturating_sub(self.n - 1)..].to_vec();
         }
         
-        // Generate tokens until we hit a sentence boundary or max length
-        let max_tokens = 15; // Limit to prevent overly long responses
+        // Generate tokens until we hit a sentence boundary
+        // We MUST generate at least one complete sentence
+        let max_tokens = 20; // Limit to prevent overly long responses
         let mut generated_count = 0;
         let mut found_sentence_end = false;
+        let min_tokens_before_stopping = 3; // Minimum tokens before we can stop at sentence end
         
-        while generated_count < max_tokens && !found_sentence_end {
-            // Check if we should look for sentence end
-            let should_stop = generated_count >= 5; // Generate at least 5 tokens before considering stopping
+        while generated_count < max_tokens {
+            // After minimum tokens, prefer sentence enders
+            let should_stop = generated_count >= min_tokens_before_stopping;
             
-            if let Some(next_token) = self.generate_continuation(&context, should_stop && !found_sentence_end) {
+            if let Some(next_token) = self.generate_continuation(&context, should_stop) {
                 response_tokens.push(next_token.clone());
                 context.push(next_token.clone());
                 
                 // Check if we hit a sentence end
                 if self.is_sentence_ender(&next_token) {
                     found_sentence_end = true;
+                    // We've completed a sentence, so we can stop
                     break;
                 }
                 
@@ -395,18 +407,40 @@ impl LanguageModel {
             }
         }
 
-        // If we didn't end with punctuation, try to add a period
+        // If we didn't end with sentence-ending punctuation, we need to complete the sentence
         if !found_sentence_end && !response_tokens.is_empty() {
             let last_token = &response_tokens[response_tokens.len() - 1];
+            
+            // Only add period if the last token is a word (not already ending with punctuation)
             if !self.is_sentence_ender(last_token) && !self.is_pause(last_token) {
-                // Try to find a natural place to end, or just add a period
-                if let Some(period_token) = self.generate_continuation(&context, true) {
-                    if self.is_sentence_ender(&period_token) {
-                        response_tokens.push(period_token);
+                // Try to find a sentence-ending continuation
+                let mut attempts = 0;
+                while attempts < 5 && !found_sentence_end {
+                    if let Some(next_token) = self.generate_continuation(&context, true) {
+                        response_tokens.push(next_token.clone());
+                        context.push(next_token.clone());
+                        
+                        if self.is_sentence_ender(&next_token) {
+                            found_sentence_end = true;
+                        } else {
+                            // Keep trying
+                            if context.len() > self.n {
+                                context.remove(0);
+                            }
+                            attempts += 1;
+                        }
+                    } else {
+                        break;
                     }
-                } else {
-                    // Fallback: add period if it makes sense
-                    response_tokens.push(".".to_string());
+                }
+                
+                // If still no sentence end, append period to last word
+                if !found_sentence_end {
+                    let last_idx = response_tokens.len() - 1;
+                    let last_word = response_tokens[last_idx].clone();
+                    // Remove any existing punctuation and add period
+                    let base_word = self.extract_word(&last_word);
+                    response_tokens[last_idx] = format!("{}.", base_word);
                 }
             }
         }
