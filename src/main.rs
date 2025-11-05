@@ -104,7 +104,7 @@ impl LanguageModel {
         token.ends_with(',') || token.ends_with(';') || token.ends_with(':')
     }
 
-    fn extract_word(&self, token: &str) -> &str {
+    fn extract_word<'a>(&self, token: &'a str) -> &'a str {
         // Remove trailing punctuation to get the base word
         token.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '\'')
     }
@@ -308,8 +308,12 @@ impl LanguageModel {
         let mut result = String::new();
         for (i, token) in tokens.iter().enumerate() {
             if i > 0 {
-                // Add space before each token (punctuation is already attached)
-                result.push(' ');
+                // Add space before each token (punctuation is already attached to words)
+                // Don't add space if previous token ended with punctuation that shouldn't have space after
+                let prev_token = &tokens[i - 1];
+                if !self.is_pause(prev_token) {
+                    result.push(' ');
+                }
             }
             result.push_str(token);
         }
