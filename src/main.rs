@@ -403,7 +403,6 @@ impl LanguageModel {
         
         let max_tokens = 30; // Limit to prevent overly long responses
         let mut generated_count = 0;
-        let mut recent_tokens: Vec<String> = Vec::new(); // Track recent tokens for repetition detection
         
         // Generate tokens one by one, each prediction based on the previous tokens
         while generated_count < max_tokens {
@@ -411,20 +410,34 @@ impl LanguageModel {
             if let Some(next_token) = self.generate_continuation(&context, false) {
                 let base_word = self.extract_word(&next_token);
                 
-                // Check for repetition: if we've seen this token recently in a pattern, stop
-                if recent_tokens.len() >= 6 {
-                    // Check for 3-token repetition pattern
-                    let last_3: Vec<&str> = recent_tokens[recent_tokens.len()-3..]
-                        .iter()
-                        .map(|t| self.extract_word(t))
-                        .collect();
-                    let current_3 = vec![
-                        self.extract_word(&recent_tokens[recent_tokens.len()-2]),
-                        self.extract_word(&recent_tokens[recent_tokens.len()-1]),
+                // Check for repetition: if the trigram (last 2 tokens + new token) already exists
+                // anywhere in the response, stop to prevent loops
+                if response_tokens.len() >= 2 {
+                    // Build the trigram we're about to generate
+                    let trigram = vec![
+                        self.extract_word(&response_tokens[response_tokens.len() - 2]),
+                        self.extract_word(&response_tokens[response_tokens.len() - 1]),
                         base_word
                     ];
                     
-                    if last_3 == current_3 {
+                    // Check if this trigram already exists anywhere in the response
+                    let mut found_repetition = false;
+                    for i in 0..=response_tokens.len().saturating_sub(3) {
+                        if i + 2 < response_tokens.len() {
+                            let existing_trigram = vec![
+                                self.extract_word(&response_tokens[i]),
+                                self.extract_word(&response_tokens[i + 1]),
+                                self.extract_word(&response_tokens[i + 2])
+                            ];
+                            
+                            if trigram == existing_trigram {
+                                found_repetition = true;
+                                break;
+                            }
+                        }
+                    }
+                    
+                    if found_repetition {
                         // Repetition detected - stop generation
                         break;
                     }
@@ -447,12 +460,6 @@ impl LanguageModel {
                 
                 // Add the generated token to the response
                 response_tokens.push(next_token.clone());
-                
-                // Track for repetition detection
-                recent_tokens.push(next_token.clone());
-                if recent_tokens.len() > 6 {
-                    recent_tokens.remove(0);
-                }
                 
                 // Add the generated token to context for next prediction
                 context.push(next_token.clone());
