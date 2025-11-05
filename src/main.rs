@@ -391,8 +391,8 @@ impl LanguageModel {
             }
         }
 
-        // GPT-like continuation generation: generate one token at a time, using each generated
-        // token to predict the next, continuing until a sentence-ending token is reached
+        // Simple continuation generation: generate one token at a time until sentence end
+        // Inspired by the reference implementation - cleaner and more straightforward
         
         // Start with context from the last part of the response (n-1 tokens for n-gram prediction)
         let mut context = if response_tokens.len() >= self.n - 1 {
@@ -402,18 +402,16 @@ impl LanguageModel {
         };
         
         let max_tokens = 30; // Limit to prevent overly long responses
-        let mut generated_count = 0;
         
-        // Generate tokens one by one, each prediction based on the previous tokens
-        while generated_count < max_tokens {
-            // Predict next token based on current context (last n-1 tokens)
+        // Generate tokens one by one, similar to reference implementation
+        loop {
+            // Get next token from context
             if let Some(next_token) = self.generate_continuation(&context, false) {
                 let base_word = self.extract_word(&next_token);
                 
                 // Check for repetition: if the trigram (last 2 tokens + new token) already exists
                 // anywhere in the response, stop to prevent loops
                 if response_tokens.len() >= 2 {
-                    // Build the trigram we're about to generate
                     let trigram = vec![
                         self.extract_word(&response_tokens[response_tokens.len() - 2]),
                         self.extract_word(&response_tokens[response_tokens.len() - 1]),
@@ -438,47 +436,30 @@ impl LanguageModel {
                     }
                     
                     if found_repetition {
-                        // Repetition detected - stop generation
-                        break;
-                    }
-                }
-                
-                // Treat "and" as sentence boundary if it appears after a complete thought
-                // This prevents continuing when the sentence naturally ends
-                if base_word == "and" && generated_count >= 2 {
-                    // If we've generated a few tokens and hit "and", it's likely a new clause
-                    // Check if the previous token could be a natural ending
-                    if let Some(prev_token) = response_tokens.last() {
-                        let prev_word = self.extract_word(prev_token);
-                        // If previous word is a noun or could end a sentence, stop before "and"
-                        if prev_word.len() > 3 && !self.is_sentence_ender(prev_token) {
-                            // Stop here - don't add "and"
-                            break;
-                        }
+                        break; // Repetition detected - stop generation
                     }
                 }
                 
                 // Add the generated token to the response
                 response_tokens.push(next_token.clone());
                 
-                // Add the generated token to context for next prediction
-                context.push(next_token.clone());
-                
-                // Stop immediately if we generated a token ending with sentence-ending punctuation
+                // Stop if token ends with sentence-ending punctuation
                 if self.is_sentence_ender(&next_token) {
                     break;
                 }
                 
-                // Maintain context window: keep only last n-1 tokens for next prediction
-                // This ensures we use the most recent context for each prediction
+                // Update context for next prediction (keep last n-1 tokens)
+                context.push(next_token);
                 if context.len() > self.n - 1 {
                     context = context[context.len().saturating_sub(self.n - 1)..].to_vec();
                 }
                 
-                generated_count += 1;
+                // Safety limit
+                if response_tokens.len() > max_tokens {
+                    break;
+                }
             } else {
-                // No more continuations available from training data - stop naturally
-                break;
+                break; // No more continuations available
             }
         }
 
