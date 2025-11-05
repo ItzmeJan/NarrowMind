@@ -403,13 +403,60 @@ impl LanguageModel {
         
         let max_tokens = 30; // Limit to prevent overly long responses
         let mut generated_count = 0;
+        let mut recent_tokens: Vec<String> = Vec::new(); // Track recent tokens for repetition detection
         
         // Generate tokens one by one, each prediction based on the previous tokens
         while generated_count < max_tokens {
             // Predict next token based on current context (last n-1 tokens)
             if let Some(next_token) = self.generate_continuation(&context, false) {
+                let base_word = self.extract_word(&next_token);
+                
+                // Check for repetition: if we've seen this token recently in a pattern, stop
+                if recent_tokens.len() >= 6 {
+                    // Check for 3-token repetition pattern
+                    let last_3: Vec<&str> = recent_tokens[recent_tokens.len()-3..]
+                        .iter()
+                        .map(|t| self.extract_word(t))
+                        .collect();
+                    let current_3 = if recent_tokens.len() >= 3 {
+                        vec![
+                            self.extract_word(&recent_tokens[recent_tokens.len()-2]),
+                            self.extract_word(&recent_tokens[recent_tokens.len()-1]),
+                            base_word
+                        ]
+                    } else {
+                        continue;
+                    };
+                    
+                    if last_3 == current_3 {
+                        // Repetition detected - stop generation
+                        break;
+                    }
+                }
+                
+                // Treat "and" as sentence boundary if it appears after a complete thought
+                // This prevents continuing when the sentence naturally ends
+                if base_word == "and" && generated_count >= 2 {
+                    // If we've generated a few tokens and hit "and", it's likely a new clause
+                    // Check if the previous token could be a natural ending
+                    if let Some(prev_token) = response_tokens.last() {
+                        let prev_word = self.extract_word(prev_token);
+                        // If previous word is a noun or could end a sentence, stop before "and"
+                        if prev_word.len() > 3 && !self.is_sentence_ender(prev_token) {
+                            // Stop here - don't add "and"
+                            break;
+                        }
+                    }
+                }
+                
                 // Add the generated token to the response
                 response_tokens.push(next_token.clone());
+                
+                // Track for repetition detection
+                recent_tokens.push(next_token.clone());
+                if recent_tokens.len() > 6 {
+                    recent_tokens.remove(0);
+                }
                 
                 // Add the generated token to context for next prediction
                 context.push(next_token.clone());
