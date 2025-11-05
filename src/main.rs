@@ -418,15 +418,11 @@ impl LanguageModel {
                         .iter()
                         .map(|t| self.extract_word(t))
                         .collect();
-                    let current_3 = if recent_tokens.len() >= 3 {
-                        vec![
-                            self.extract_word(&recent_tokens[recent_tokens.len()-2]),
-                            self.extract_word(&recent_tokens[recent_tokens.len()-1]),
-                            base_word
-                        ]
-                    } else {
-                        continue;
-                    };
+                    let current_3 = vec![
+                        self.extract_word(&recent_tokens[recent_tokens.len()-2]),
+                        self.extract_word(&recent_tokens[recent_tokens.len()-1]),
+                        base_word
+                    ];
                     
                     if last_3 == current_3 {
                         // Repetition detected - stop generation
