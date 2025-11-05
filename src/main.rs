@@ -99,37 +99,131 @@ impl LanguageModel {
         }
     }
 
-    fn find_matching_ngrams(&self, query: &[String]) -> Vec<NGram> {
-        let mut matches = Vec::new();
+    fn is_question_word(&self, word: &str) -> bool {
         let question_words = vec!["who", "what", "where", "when", "why", "how", "which", "whose", "whom"];
+        question_words.contains(&word.to_lowercase().as_str())
+    }
 
-        for ngram in self.ngram_counts.keys() {
-            if ngram.len() != query.len() {
-                continue;
-            }
-
-            let mut matches_query = true;
-            for (i, query_token) in query.iter().enumerate() {
-                let query_lower = query_token.to_lowercase();
-                
-                // If query token is a question word, it matches anything (wildcard)
-                if question_words.contains(&query_lower.as_str()) {
+    fn find_matching_ngrams_with_context(&self, query: &[String], wildcard_pos: usize) -> Vec<(String, u32)> {
+        // Use words before and after the wildcard as context to predict what should replace it
+        let mut candidates = Vec::new();
+        
+        // Strategy 1: If query length matches n-gram length, do direct matching
+        if query.len() == self.n {
+            for ngram in self.ngram_counts.keys() {
+                if ngram.len() != self.n {
                     continue;
                 }
-                
-                // Otherwise, check if it matches the ngram token
-                if ngram[i].to_lowercase() != query_lower {
-                    matches_query = false;
-                    break;
-                }
-            }
 
-            if matches_query {
-                matches.push(ngram.clone());
+                // Check if this n-gram matches the query pattern (non-wildcard positions must match)
+                let mut matches = true;
+                for (i, query_token) in query.iter().enumerate() {
+                    if i == wildcard_pos {
+                        continue; // Skip wildcard position - it can be anything
+                    }
+                    if ngram[i].to_lowercase() != query_token.to_lowercase() {
+                        matches = false;
+                        break;
+                    }
+                }
+
+                if matches && wildcard_pos < ngram.len() {
+                    let candidate = ngram[wildcard_pos].clone();
+                    let count = *self.ngram_counts.get(ngram).unwrap_or(&0);
+                    
+                    if let Some(existing) = candidates.iter_mut().find(|(word, _)| word == &candidate) {
+                        existing.1 += count;
+                    } else {
+                        candidates.push((candidate, count));
+                    }
+                }
             }
         }
 
-        matches
+        // Strategy 2: Use sliding windows - match query segments of length n against n-grams
+        // This handles cases where query length != n
+        if candidates.is_empty() {
+            // Try windows that include the wildcard position
+            for window_start in 0..=query.len().saturating_sub(self.n) {
+                let window_end = window_start + self.n;
+                if window_end > query.len() {
+                    break;
+                }
+                
+                // Check if wildcard is in this window
+                if wildcard_pos < window_start || wildcard_pos >= window_end {
+                    continue;
+                }
+
+                let query_window = &query[window_start..window_end];
+                let relative_wildcard_pos = wildcard_pos - window_start;
+
+                for ngram in self.ngram_counts.keys() {
+                    if ngram.len() != self.n {
+                        continue;
+                    }
+
+                    // Check if n-gram matches query window pattern
+                    let mut matches = true;
+                    for (i, query_token) in query_window.iter().enumerate() {
+                        if i == relative_wildcard_pos {
+                            continue; // Skip wildcard position
+                        }
+                        if ngram[i].to_lowercase() != query_token.to_lowercase() {
+                            matches = false;
+                            break;
+                        }
+                    }
+
+                    if matches && relative_wildcard_pos < ngram.len() {
+                        let candidate = ngram[relative_wildcard_pos].clone();
+                        let count = *self.ngram_counts.get(ngram).unwrap_or(&0);
+                        
+                        if let Some(existing) = candidates.iter_mut().find(|(word, _)| word == &candidate) {
+                            existing.1 += count;
+                        } else {
+                            candidates.push((candidate, count));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Strategy 3: Use context before wildcard (fallback)
+        if candidates.is_empty() && wildcard_pos > 0 {
+            let context_start = wildcard_pos.saturating_sub(self.n - 1);
+            let context: Vec<String> = query[context_start..wildcard_pos].to_vec();
+            
+            if !context.is_empty() {
+                // Look for n-grams that start with this context
+                for ngram in self.ngram_counts.keys() {
+                    if ngram.len() < context.len() + 1 {
+                        continue;
+                    }
+
+                    // Check if n-gram starts with our context
+                    let context_len = context.len().min(self.n - 1);
+                    if context_len > 0 && ngram.len() >= context_len + 1 {
+                        let ngram_prefix = &ngram[..context_len];
+                        let query_prefix = &context[context.len().saturating_sub(context_len)..];
+                        
+                        if ngram_prefix == query_prefix {
+                            // The word right after the context is our candidate
+                            let candidate = ngram[context_len].clone();
+                            let count = *self.ngram_counts.get(ngram).unwrap_or(&0);
+                            
+                            if let Some(existing) = candidates.iter_mut().find(|(word, _)| word == &candidate) {
+                                existing.1 += count;
+                            } else {
+                                candidates.push((candidate, count));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        candidates
     }
 
     fn generate_response(&self, query: &str) -> String {
@@ -139,11 +233,15 @@ impl LanguageModel {
             return "I don't understand.".to_string();
         }
 
-        // Find matching n-grams
-        let matches = self.find_matching_ngrams(&query_tokens);
-        
-        if matches.is_empty() {
-            // Try to generate based on context
+        // Find wildcard positions (question words)
+        let wildcard_positions: Vec<usize> = query_tokens.iter()
+            .enumerate()
+            .filter(|(_, token)| self.is_question_word(token))
+            .map(|(i, _)| i)
+            .collect();
+
+        // If no wildcards, try simple continuation
+        if wildcard_positions.is_empty() {
             let context: Vec<String> = query_tokens[..query_tokens.len().min(self.n - 1)].to_vec();
             if let Some(continuation) = self.generate_continuation(&context) {
                 let mut response = query_tokens.join(" ");
@@ -154,19 +252,38 @@ impl LanguageModel {
             return "I don't have enough information to answer that.".to_string();
         }
 
-        // Select the most frequent matching n-gram
-        let best_match = matches.iter()
-            .max_by_key(|ngram| {
-                let ngram_ref: &Vec<String> = ngram;
-                self.ngram_counts.get(ngram_ref).unwrap_or(&0)
-            })
-            .unwrap();
-
-        // Generate continuation from the match
-        let mut response = best_match.join(" ");
+        // Process wildcards: predict words to replace them
+        let mut response_tokens = query_tokens.clone();
         
-        // Try to generate a few more tokens
-        let mut context = best_match.clone();
+        // Process each wildcard position
+        for &wildcard_pos in &wildcard_positions {
+            // Find candidates for this wildcard position using context
+            let candidates = self.find_matching_ngrams_with_context(&response_tokens, wildcard_pos);
+            
+            if !candidates.is_empty() {
+                // Select the most frequent candidate
+                let best_candidate = candidates.iter()
+                    .max_by_key(|(_, count)| count)
+                    .map(|(word, _)| word.clone());
+                
+                if let Some(predicted_word) = best_candidate {
+                    // Replace the wildcard with the predicted word
+                    if wildcard_pos < response_tokens.len() {
+                        response_tokens[wildcard_pos] = predicted_word;
+                    }
+                }
+            }
+        }
+
+        // Generate continuation from the completed response
+        let mut response = response_tokens.join(" ");
+        
+        // Try to generate a few more tokens based on the last part of the response
+        let mut context = response_tokens.clone();
+        if context.len() > self.n - 1 {
+            context = context[context.len().saturating_sub(self.n - 1)..].to_vec();
+        }
+        
         for _ in 0..3 {
             if let Some(next_token) = self.generate_continuation(&context) {
                 response.push(' ');
