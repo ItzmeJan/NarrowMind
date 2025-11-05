@@ -112,52 +112,67 @@ impl LanguageModel {
     }
 
     fn generate_continuation(&self, context: &[String], stop_at_sentence_end: bool) -> Option<String> {
-        if context.len() < self.n - 1 {
+        if context.is_empty() {
             return None;
         }
 
-        let context_key: Vec<String> = context[context.len().saturating_sub(self.n - 1)..].to_vec();
-        
-        // Try exact match first
-        if let Some(continuations) = self.ngram_contexts.get(&context_key) {
-            if continuations.is_empty() {
-                return None;
-            }
-
-            // Filter out sentence enders if we're not ready to stop
-            let candidates: Vec<_> = if stop_at_sentence_end {
-                // Prefer sentence enders
-                continuations.iter()
-                    .filter(|(token, _)| self.is_sentence_ender(token))
-                    .collect()
-            } else {
-                // Avoid sentence enders unless it's appropriate
-                continuations.iter()
-                    .filter(|(token, _)| !self.is_sentence_ender(token))
-                    .collect()
-            };
-
-            let candidates_to_use = if candidates.is_empty() {
-                continuations.iter().collect()
-            } else {
-                candidates
-            };
-
-            // Weighted selection based on frequency
-            let total: u32 = candidates_to_use.iter().map(|(_, count)| *count).sum();
-            if total == 0 {
-                return None;
-            }
+        // Try with full context (n-1 tokens) first
+        if context.len() >= self.n - 1 {
+            let context_key: Vec<String> = context[context.len().saturating_sub(self.n - 1)..].to_vec();
             
-            // Use most frequent instead of weighted random for determinism
-            candidates_to_use.iter()
-                .max_by_key(|(_, count)| *count)
-                .map(|(token, _)| token.clone())
-        } else {
-            // No exact match - return None rather than using incorrect fallback
-            // This ensures we only use tokens that actually follow the exact context
-            None
+            if let Some(continuations) = self.ngram_contexts.get(&context_key) {
+                if !continuations.is_empty() {
+                    return self.select_from_continuations(continuations, stop_at_sentence_end);
+                }
+            }
         }
+
+        // Fallback: try with shorter context (just the last token)
+        // Look for contexts where the last token matches our last token
+        if context.len() >= 1 {
+            let last_token = &context[context.len() - 1];
+            
+            // Try to find any n-gram context where the last token matches
+            for (ctx_key, continuations) in &self.ngram_contexts {
+                if !ctx_key.is_empty() && ctx_key[ctx_key.len() - 1] == *last_token && !continuations.is_empty() {
+                    return self.select_from_continuations(continuations, stop_at_sentence_end);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn select_from_continuations(&self, continuations: &[(String, u32)], stop_at_sentence_end: bool) -> Option<String> {
+        // Filter out sentence enders if we're not ready to stop
+        let candidates: Vec<_> = if stop_at_sentence_end {
+            // Prefer sentence enders
+            continuations.iter()
+                .filter(|(token, _)| self.is_sentence_ender(token))
+                .collect()
+        } else {
+            // Avoid sentence enders unless it's appropriate
+            continuations.iter()
+                .filter(|(token, _)| !self.is_sentence_ender(token))
+                .collect()
+        };
+
+        let candidates_to_use = if candidates.is_empty() {
+            continuations.iter().collect()
+        } else {
+            candidates
+        };
+
+        // Weighted selection based on frequency
+        let total: u32 = candidates_to_use.iter().map(|(_, count)| *count).sum();
+        if total == 0 {
+            return None;
+        }
+        
+        // Use most frequent instead of weighted random for determinism
+        candidates_to_use.iter()
+            .max_by_key(|(_, count)| *count)
+            .map(|(token, _)| token.clone())
     }
 
     fn is_question_word(&self, word: &str) -> bool {
