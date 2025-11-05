@@ -76,17 +76,19 @@ impl LanguageModel {
                 // Include apostrophes for contractions
                 current_word.push(ch);
             } else {
-                // Punctuation encountered
+                // Punctuation encountered - attach to current word if it exists
                 if !current_word.is_empty() {
+                    current_word.push(ch);
                     tokens.push(current_word.clone());
                     current_word.clear();
+                } else {
+                    // Punctuation at start (shouldn't happen often, but handle it)
+                    tokens.push(ch.to_string());
                 }
-                // Treat punctuation as separate tokens
-                tokens.push(ch.to_string());
             }
         }
         
-        // Add any remaining word
+        // Add any remaining word (without trailing punctuation)
         if !current_word.is_empty() {
             tokens.push(current_word);
         }
@@ -95,11 +97,16 @@ impl LanguageModel {
     }
 
     fn is_sentence_ender(&self, token: &str) -> bool {
-        token == "." || token == "!" || token == "?"
+        token.ends_with('.') || token.ends_with('!') || token.ends_with('?')
     }
 
     fn is_pause(&self, token: &str) -> bool {
-        token == "," || token == ";" || token == ":"
+        token.ends_with(',') || token.ends_with(';') || token.ends_with(':')
+    }
+
+    fn extract_word(&self, token: &str) -> &str {
+        // Remove trailing punctuation to get the base word
+        token.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '\'')
     }
 
     fn generate_continuation(&self, context: &[String], stop_at_sentence_end: bool) -> Option<String> {
@@ -177,7 +184,10 @@ impl LanguageModel {
                     if i == wildcard_pos {
                         continue; // Skip wildcard position - it can be anything
                     }
-                    if ngram[i].to_lowercase() != query_token.to_lowercase() {
+                    // Compare base words (ignore punctuation differences)
+                    let ngram_word = self.extract_word(&ngram[i]);
+                    let query_word = self.extract_word(query_token);
+                    if ngram_word != query_word {
                         matches = false;
                         break;
                     }
@@ -225,7 +235,10 @@ impl LanguageModel {
                         if i == relative_wildcard_pos {
                             continue; // Skip wildcard position
                         }
-                        if ngram[i].to_lowercase() != query_token.to_lowercase() {
+                        // Compare base words (ignore punctuation differences)
+                        let ngram_word = self.extract_word(&ngram[i]);
+                        let query_word = self.extract_word(query_token);
+                        if ngram_word != query_word {
                             matches = false;
                             break;
                         }
@@ -285,14 +298,9 @@ impl LanguageModel {
     fn format_tokens(&self, tokens: &[String]) -> String {
         let mut result = String::new();
         for (i, token) in tokens.iter().enumerate() {
-            let is_punct = self.is_sentence_ender(token) || self.is_pause(token);
-            
             if i > 0 {
-                let prev_is_punct = self.is_sentence_ender(&tokens[i - 1]) || self.is_pause(&tokens[i - 1]);
-                // Add space before word tokens, but not before/after punctuation
-                if !is_punct && !prev_is_punct {
-                    result.push(' ');
-                }
+                // Add space before each token (punctuation is already attached)
+                result.push(' ');
             }
             result.push_str(token);
         }
@@ -306,10 +314,13 @@ impl LanguageModel {
             return "I don't understand.".to_string();
         }
 
-        // Find wildcard positions (question words) - ignore punctuation
+        // Find wildcard positions (question words) - extract word part for matching
         let wildcard_positions: Vec<usize> = query_tokens.iter()
             .enumerate()
-            .filter(|(_, token)| !self.is_sentence_ender(token) && !self.is_pause(token) && self.is_question_word(token))
+            .filter(|(_, token)| {
+                let word = self.extract_word(token);
+                self.is_question_word(word)
+            })
             .map(|(i, _)| i)
             .collect();
 
