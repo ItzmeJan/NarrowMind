@@ -309,11 +309,7 @@ impl LanguageModel {
         for (i, token) in tokens.iter().enumerate() {
             if i > 0 {
                 // Add space before each token (punctuation is already attached to words)
-                // Don't add space if previous token ended with punctuation that shouldn't have space after
-                let prev_token = &tokens[i - 1];
-                if !self.is_pause(prev_token) {
-                    result.push(' ');
-                }
+                result.push(' ');
             }
             result.push_str(token);
         }
