@@ -62,14 +62,47 @@ impl LanguageModel {
     }
 
     fn tokenize(&self, text: &str) -> Vec<String> {
-        text.to_lowercase()
-            .split_whitespace()
-            .map(|s| s.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
+        let mut tokens = Vec::new();
+        let text_lower = text.to_lowercase();
+        let mut current_word = String::new();
+        
+        for ch in text_lower.chars() {
+            if ch.is_whitespace() {
+                if !current_word.is_empty() {
+                    tokens.push(current_word.clone());
+                    current_word.clear();
+                }
+            } else if ch.is_alphanumeric() || ch == '\'' {
+                // Include apostrophes for contractions
+                current_word.push(ch);
+            } else {
+                // Punctuation encountered
+                if !current_word.is_empty() {
+                    tokens.push(current_word.clone());
+                    current_word.clear();
+                }
+                // Treat punctuation as separate tokens
+                tokens.push(ch.to_string());
+            }
+        }
+        
+        // Add any remaining word
+        if !current_word.is_empty() {
+            tokens.push(current_word);
+        }
+        
+        tokens
     }
 
-    fn generate_continuation(&self, context: &[String]) -> Option<String> {
+    fn is_sentence_ender(&self, token: &str) -> bool {
+        token == "." || token == "!" || token == "?"
+    }
+
+    fn is_pause(&self, token: &str) -> bool {
+        token == "," || token == ";" || token == ":"
+    }
+
+    fn generate_continuation(&self, context: &[String], stop_at_sentence_end: bool) -> Option<String> {
         if context.len() < self.n - 1 {
             return None;
         }
@@ -81,18 +114,41 @@ impl LanguageModel {
                 return None;
             }
 
-            // Weighted random selection based on frequency
-            let total: u32 = continuations.iter().map(|(_, count)| count).sum();
-            let mut rng = (total as f64 * 0.5) as u32; // Simple deterministic selection
-            for (token, count) in continuations {
+            // Filter out sentence enders if we're not ready to stop
+            let candidates: Vec<_> = if stop_at_sentence_end {
+                // Prefer sentence enders
+                continuations.iter()
+                    .filter(|(token, _)| self.is_sentence_ender(token))
+                    .collect()
+            } else {
+                // Avoid sentence enders unless it's appropriate
+                continuations.iter()
+                    .filter(|(token, _)| !self.is_sentence_ender(token))
+                    .collect()
+            };
+
+            let candidates_to_use = if candidates.is_empty() {
+                continuations.iter().collect()
+            } else {
+                candidates
+            };
+
+            // Weighted selection based on frequency
+            let total: u32 = candidates_to_use.iter().map(|(_, count)| *count).sum();
+            if total == 0 {
+                return None;
+            }
+            
+            let mut rng = (total as f64 * 0.5) as u32;
+            for (token, count) in &candidates_to_use {
                 if rng < *count {
                     return Some(token.clone());
                 }
                 rng -= count;
             }
             // Fallback to most frequent
-            continuations.iter()
-                .max_by_key(|(_, count)| count)
+            candidates_to_use.iter()
+                .max_by_key(|(_, count)| *count)
                 .map(|(token, _)| token.clone())
         } else {
             None
@@ -226,6 +282,23 @@ impl LanguageModel {
         candidates
     }
 
+    fn format_tokens(&self, tokens: &[String]) -> String {
+        let mut result = String::new();
+        for (i, token) in tokens.iter().enumerate() {
+            let is_punct = self.is_sentence_ender(token) || self.is_pause(token);
+            
+            if i > 0 {
+                let prev_is_punct = self.is_sentence_ender(&tokens[i - 1]) || self.is_pause(&tokens[i - 1]);
+                // Add space before word tokens, but not before/after punctuation
+                if !is_punct && !prev_is_punct {
+                    result.push(' ');
+                }
+            }
+            result.push_str(token);
+        }
+        result
+    }
+
     fn generate_response(&self, query: &str) -> String {
         let query_tokens = self.tokenize(query);
         
@@ -233,21 +306,20 @@ impl LanguageModel {
             return "I don't understand.".to_string();
         }
 
-        // Find wildcard positions (question words)
+        // Find wildcard positions (question words) - ignore punctuation
         let wildcard_positions: Vec<usize> = query_tokens.iter()
             .enumerate()
-            .filter(|(_, token)| self.is_question_word(token))
+            .filter(|(_, token)| !self.is_sentence_ender(token) && !self.is_pause(token) && self.is_question_word(token))
             .map(|(i, _)| i)
             .collect();
 
         // If no wildcards, try simple continuation
         if wildcard_positions.is_empty() {
             let context: Vec<String> = query_tokens[..query_tokens.len().min(self.n - 1)].to_vec();
-            if let Some(continuation) = self.generate_continuation(&context) {
-                let mut response = query_tokens.join(" ");
-                response.push(' ');
-                response.push_str(&continuation);
-                return response;
+            if let Some(continuation) = self.generate_continuation(&context, false) {
+                let mut response_tokens = query_tokens.clone();
+                response_tokens.push(continuation);
+                return self.format_tokens(&response_tokens);
             }
             return "I don't have enough information to answer that.".to_string();
         }
@@ -276,29 +348,59 @@ impl LanguageModel {
         }
 
         // Generate continuation from the completed response
-        let mut response = response_tokens.join(" ");
-        
-        // Try to generate a few more tokens based on the last part of the response
+        // Build context from the last part of the response
         let mut context = response_tokens.clone();
         if context.len() > self.n - 1 {
             context = context[context.len().saturating_sub(self.n - 1)..].to_vec();
         }
         
-        for _ in 0..3 {
-            if let Some(next_token) = self.generate_continuation(&context) {
-                response.push(' ');
-                response.push_str(&next_token);
-                context.push(next_token);
+        // Generate tokens until we hit a sentence boundary or max length
+        let max_tokens = 15; // Limit to prevent overly long responses
+        let mut generated_count = 0;
+        let mut found_sentence_end = false;
+        
+        while generated_count < max_tokens && !found_sentence_end {
+            // Check if we should look for sentence end
+            let should_stop = generated_count >= 5; // Generate at least 5 tokens before considering stopping
+            
+            if let Some(next_token) = self.generate_continuation(&context, should_stop && !found_sentence_end) {
+                response_tokens.push(next_token.clone());
+                context.push(next_token.clone());
+                
+                // Check if we hit a sentence end
+                if self.is_sentence_ender(&next_token) {
+                    found_sentence_end = true;
+                    break;
+                }
+                
                 // Keep context size manageable
                 if context.len() > self.n {
                     context.remove(0);
                 }
+                
+                generated_count += 1;
             } else {
                 break;
             }
         }
 
-        response
+        // If we didn't end with punctuation, try to add a period
+        if !found_sentence_end && !response_tokens.is_empty() {
+            let last_token = &response_tokens[response_tokens.len() - 1];
+            if !self.is_sentence_ender(last_token) && !self.is_pause(last_token) {
+                // Try to find a natural place to end, or just add a period
+                if let Some(period_token) = self.generate_continuation(&context, true) {
+                    if self.is_sentence_ender(&period_token) {
+                        response_tokens.push(period_token);
+                    }
+                } else {
+                    // Fallback: add period if it makes sense
+                    response_tokens.push(".".to_string());
+                }
+            }
+        }
+
+        self.format_tokens(&response_tokens)
     }
 }
 
