@@ -24,6 +24,8 @@ impl LanguageModel {
     }
 
     fn train(&mut self, text: &str) {
+        // Tokenize training data - all words including question words are treated as regular tokens
+        // Question words in training data (like "when" in "for school when") are NOT wildcards
         let tokens = self.tokenize(text);
         if tokens.len() < self.n {
             return;
@@ -116,6 +118,7 @@ impl LanguageModel {
 
         let context_key: Vec<String> = context[context.len().saturating_sub(self.n - 1)..].to_vec();
         
+        // Try exact match first
         if let Some(continuations) = self.ngram_contexts.get(&context_key) {
             if continuations.is_empty() {
                 return None;
@@ -146,18 +149,13 @@ impl LanguageModel {
                 return None;
             }
             
-            let mut rng = (total as f64 * 0.5) as u32;
-            for (token, count) in &candidates_to_use {
-                if rng < *count {
-                    return Some(token.clone());
-                }
-                rng -= count;
-            }
-            // Fallback to most frequent
+            // Use most frequent instead of weighted random for determinism
             candidates_to_use.iter()
                 .max_by_key(|(_, count)| *count)
                 .map(|(token, _)| token.clone())
         } else {
+            // No exact match - return None rather than using incorrect fallback
+            // This ensures we only use tokens that actually follow the exact context
             None
         }
     }
@@ -323,7 +321,8 @@ impl LanguageModel {
             return "I don't understand.".to_string();
         }
 
-        // Find wildcard positions (question words) - extract word part for matching
+        // Find wildcard positions (question words) - ONLY in the user's query, not in training data
+        // Question words in training data are treated as regular tokens
         let wildcard_positions: Vec<usize> = query_tokens.iter()
             .enumerate()
             .filter(|(_, token)| {
@@ -374,9 +373,9 @@ impl LanguageModel {
             context = context[context.len().saturating_sub(self.n - 1)..].to_vec();
         }
         
-        // Generate tokens until we hit a sentence boundary
-        // Stop immediately when we generate a token ending with sentence-ending punctuation
-        let max_tokens = 20; // Limit to prevent overly long responses
+        // Generate tokens naturally until we hit a sentence boundary
+        // Stop only when we generate a token ending with sentence-ending punctuation
+        let max_tokens = 30; // Limit to prevent overly long responses
         let mut generated_count = 0;
         
         while generated_count < max_tokens {
@@ -389,50 +388,15 @@ impl LanguageModel {
                     break;
                 }
                 
-                // Keep context size manageable
-                if context.len() > self.n {
-                    context.remove(0);
+                // Keep context size manageable (use last n-1 tokens)
+                if context.len() > self.n - 1 {
+                    context = context[context.len().saturating_sub(self.n - 1)..].to_vec();
                 }
                 
                 generated_count += 1;
             } else {
+                // No more continuations available - stop naturally
                 break;
-            }
-        }
-
-        // If we didn't end with sentence-ending punctuation, try to find one
-        if !response_tokens.is_empty() {
-            let last_token = &response_tokens[response_tokens.len() - 1];
-            
-            if !self.is_sentence_ender(last_token) {
-                // Try to find a sentence-ending continuation
-                let mut attempts = 0;
-                while attempts < 5 {
-                    if let Some(next_token) = self.generate_continuation(&context, true) {
-                        response_tokens.push(next_token.clone());
-                        context.push(next_token.clone());
-                        
-                        if self.is_sentence_ender(&next_token) {
-                            break;
-                        }
-                        
-                        if context.len() > self.n {
-                            context.remove(0);
-                        }
-                        attempts += 1;
-                    } else {
-                        break;
-                    }
-                }
-                
-                // If still no sentence end, append period to last word
-                let last_token = &response_tokens[response_tokens.len() - 1];
-                if !self.is_sentence_ender(last_token) {
-                    let last_idx = response_tokens.len() - 1;
-                    let last_word = response_tokens[last_idx].clone();
-                    let base_word = self.extract_word(&last_word);
-                    response_tokens[last_idx] = format!("{}.", base_word);
-                }
             }
         }
 
