@@ -24,9 +24,19 @@ impl LanguageModel {
     }
 
     fn train(&mut self, text: &str) {
-        // Tokenize training data - all words including question words are treated as regular tokens
-        // Question words in training data (like "when" in "for school when") are NOT wildcards
-        let tokens = self.tokenize(text);
+        // Tokenize training data and filter out question words
+        // Question words are automatically removed to avoid confusion with query wildcards
+        let all_tokens = self.tokenize(text);
+        
+        // Filter out question words from training tokens
+        let tokens: Vec<String> = all_tokens.iter()
+            .filter(|token| {
+                let word = self.extract_word(token);
+                !self.is_question_word(word)
+            })
+            .cloned()
+            .collect();
+        
         if tokens.len() < self.n {
             return;
         }
@@ -55,7 +65,7 @@ impl LanguageModel {
             }
         }
 
-        // Build vocabulary
+        // Build vocabulary (only non-question words)
         for token in &tokens {
             if !self.vocabulary.contains(token) {
                 self.vocabulary.push(token.clone());
