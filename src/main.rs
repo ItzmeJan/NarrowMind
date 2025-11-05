@@ -366,36 +366,43 @@ impl LanguageModel {
             }
         }
 
-        // Generate continuation from the completed response
-        // Build context from the last part of the response
-        let mut context = response_tokens.clone();
-        if context.len() > self.n - 1 {
-            context = context[context.len().saturating_sub(self.n - 1)..].to_vec();
-        }
+        // GPT-like continuation generation: generate one token at a time, using each generated
+        // token to predict the next, continuing until a sentence-ending token is reached
         
-        // Generate tokens naturally until we hit a sentence boundary
-        // Stop only when we generate a token ending with sentence-ending punctuation
+        // Start with context from the last part of the response (n-1 tokens for n-gram prediction)
+        let mut context = if response_tokens.len() >= self.n - 1 {
+            response_tokens[response_tokens.len().saturating_sub(self.n - 1)..].to_vec()
+        } else {
+            response_tokens.clone()
+        };
+        
         let max_tokens = 30; // Limit to prevent overly long responses
         let mut generated_count = 0;
         
+        // Generate tokens one by one, each prediction based on the previous tokens
         while generated_count < max_tokens {
+            // Predict next token based on current context (last n-1 tokens)
             if let Some(next_token) = self.generate_continuation(&context, false) {
+                // Add the generated token to the response
                 response_tokens.push(next_token.clone());
+                
+                // Add the generated token to context for next prediction
                 context.push(next_token.clone());
                 
-                // Stop immediately if the token ends with sentence-ending punctuation
+                // Stop immediately if we generated a token ending with sentence-ending punctuation
                 if self.is_sentence_ender(&next_token) {
                     break;
                 }
                 
-                // Keep context size manageable (use last n-1 tokens)
+                // Maintain context window: keep only last n-1 tokens for next prediction
+                // This ensures we use the most recent context for each prediction
                 if context.len() > self.n - 1 {
                     context = context[context.len().saturating_sub(self.n - 1)..].to_vec();
                 }
                 
                 generated_count += 1;
             } else {
-                // No more continuations available - stop naturally
+                // No more continuations available from training data - stop naturally
                 break;
             }
         }
