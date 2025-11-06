@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufRead, Write};
+use rand::Rng;
 
 type NGram = Vec<String>;
 type NGramCount = HashMap<NGram, u32>;
@@ -11,6 +12,10 @@ struct LanguageModel {
     ngram_counts: NGramCount,
     ngram_contexts: NGramContext,
     vocabulary: Vec<String>,
+    unigram_counts: HashMap<String, u32>, // For smoothing and backoff
+    total_unigrams: u32, // Total word count for probability calculations
+    temperature: f64, // Controls randomness: 1.0 = normal, <1.0 = more deterministic, >1.0 = more random
+    top_k: usize, // Only consider top-k most likely tokens (0 = no limit)
 }
 
 impl LanguageModel {
@@ -20,6 +25,10 @@ impl LanguageModel {
             ngram_counts: HashMap::new(),
             ngram_contexts: HashMap::new(),
             vocabulary: Vec::new(),
+            unigram_counts: HashMap::new(),
+            total_unigrams: 0,
+            temperature: 1.0, // Default: normal randomness
+            top_k: 40, // Default: consider top 40 candidates
         }
     }
 
@@ -65,11 +74,14 @@ impl LanguageModel {
             }
         }
 
-        // Build vocabulary (only non-question words)
+        // Build vocabulary and unigram counts (only non-question words)
         for token in &tokens {
             if !self.vocabulary.contains(token) {
                 self.vocabulary.push(token.clone());
             }
+            // Count unigrams for smoothing and backoff
+            *self.unigram_counts.entry(token.clone()).or_insert(0) += 1;
+            self.total_unigrams += 1;
         }
     }
 
@@ -126,7 +138,10 @@ impl LanguageModel {
             return None;
         }
 
-        // Try with full context (n-1 tokens) first
+        // Markov chain with proper backoff strategy: try longer contexts first, then shorter
+        // This implements a proper n-gram backoff model
+        
+        // Strategy 1: Try full n-gram context (n-1 tokens)
         if context.len() >= self.n - 1 {
             let context_key: Vec<String> = context[context.len().saturating_sub(self.n - 1)..].to_vec();
             
@@ -137,17 +152,64 @@ impl LanguageModel {
             }
         }
 
-        // Fallback: try with shorter context (just the last token)
-        // Look for contexts where the last token matches our last token
+        // Strategy 2: Backoff to (n-2) context (if n > 2)
+        if self.n > 2 && context.len() >= self.n - 2 {
+            let context_key: Vec<String> = context[context.len().saturating_sub(self.n - 2)..].to_vec();
+            
+            // Find all contexts that end with our context
+            let mut backoff_continuations: Vec<(String, u32)> = Vec::new();
+            for (ctx_key, continuations) in &self.ngram_contexts {
+                if ctx_key.len() >= context_key.len() {
+                    let ctx_suffix = &ctx_key[ctx_key.len() - context_key.len()..];
+                    if ctx_suffix == context_key.as_slice() {
+                        for (token, count) in continuations {
+                            if let Some(existing) = backoff_continuations.iter_mut().find(|(t, _)| t == token) {
+                                existing.1 += count;
+                            } else {
+                                backoff_continuations.push((token.clone(), *count));
+                            }
+                        }
+                    }
+                }
+            }
+            
+            if !backoff_continuations.is_empty() {
+                return self.select_from_continuations(&backoff_continuations, stop_at_sentence_end);
+            }
+        }
+
+        // Strategy 3: Backoff to bigram (last token only)
         if context.len() >= 1 {
             let last_token = &context[context.len() - 1];
             
-            // Try to find any n-gram context where the last token matches
+            // Collect all continuations where the context ends with our last token
+            let mut bigram_continuations: Vec<(String, u32)> = Vec::new();
             for (ctx_key, continuations) in &self.ngram_contexts {
-                if !ctx_key.is_empty() && ctx_key[ctx_key.len() - 1] == *last_token && !continuations.is_empty() {
-                    return self.select_from_continuations(continuations, stop_at_sentence_end);
+                if !ctx_key.is_empty() && ctx_key[ctx_key.len() - 1] == *last_token {
+                    for (token, count) in continuations {
+                        if let Some(existing) = bigram_continuations.iter_mut().find(|(t, _)| t == token) {
+                            existing.1 += count;
+                        } else {
+                            bigram_continuations.push((token.clone(), *count));
+                        }
+                    }
                 }
             }
+            
+            if !bigram_continuations.is_empty() {
+                return self.select_from_continuations(&bigram_continuations, stop_at_sentence_end);
+            }
+        }
+
+        // Strategy 4: Final backoff to unigram (most frequent words overall)
+        // This uses Laplace smoothing - all words have at least a small probability
+        if !self.unigram_counts.is_empty() {
+            let unigram_candidates: Vec<(String, u32)> = self.unigram_counts
+                .iter()
+                .map(|(token, count)| (token.clone(), *count))
+                .collect();
+            
+            return self.select_from_continuations(&unigram_candidates, stop_at_sentence_end);
         }
 
         None
@@ -173,13 +235,63 @@ impl LanguageModel {
             candidates
         };
 
-        // Weighted selection based on frequency
-        let total: u32 = candidates_to_use.iter().map(|(_, count)| *count).sum();
-        if total == 0 {
+        if candidates_to_use.is_empty() {
             return None;
         }
+
+        // Apply Laplace smoothing (add-one smoothing) for better probability estimation
+        let mut smoothed_candidates: Vec<(String, f64)> = candidates_to_use
+            .iter()
+            .map(|(token, count)| {
+                // Laplace smoothing: P(w|c) = (count(w,c) + 1) / (count(c) + |V|)
+                let smoothed_count = (*count as f64) + 1.0;
+                (token.clone(), smoothed_count)
+            })
+            .collect();
+
+        // Sort by probability (descending) for top-k sampling
+        smoothed_candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // Apply top-k filtering: only consider top-k most likely tokens
+        if self.top_k > 0 && smoothed_candidates.len() > self.top_k {
+            smoothed_candidates.truncate(self.top_k);
+        }
+
+        // Apply temperature scaling to probabilities
+        // Lower temperature = sharper distribution (more deterministic)
+        // Higher temperature = flatter distribution (more random)
+        let temperature = self.temperature.max(0.01); // Prevent division by zero
+        let temperature_scaled: Vec<(String, f64)> = smoothed_candidates
+            .iter()
+            .map(|(token, weight)| {
+                // Apply temperature: weight^(1/temperature)
+                // For temperature < 1, this amplifies differences
+                // For temperature > 1, this reduces differences
+                let scaled_weight = weight.powf(1.0 / temperature);
+                (token.clone(), scaled_weight)
+            })
+            .collect();
+
+        // Calculate total weight for normalization
+        let total_weight: f64 = temperature_scaled.iter().map(|(_, weight)| *weight).sum();
         
-        // Use most frequent instead of weighted random for determinism
+        if total_weight == 0.0 {
+            return None;
+        }
+
+        // Weighted random selection based on temperature-scaled probabilities
+        let mut rng = rand::thread_rng();
+        let random_value = rng.gen::<f64>() * total_weight;
+        
+        let mut cumulative_weight = 0.0;
+        for (token, weight) in &temperature_scaled {
+            cumulative_weight += weight;
+            if random_value <= cumulative_weight {
+                return Some(token.clone());
+            }
+        }
+
+        // Fallback to most frequent (shouldn't reach here, but safety)
         candidates_to_use.iter()
             .max_by_key(|(_, count)| *count)
             .map(|(token, _)| token.clone())
@@ -188,6 +300,21 @@ impl LanguageModel {
     fn is_question_word(&self, word: &str) -> bool {
         let question_words = vec!["who", "what", "where", "when", "why", "how", "which", "whose", "whom"];
         question_words.contains(&word.to_lowercase().as_str())
+    }
+
+    /// Set the temperature for sampling (controls randomness)
+    /// - temperature < 1.0: more deterministic, focused on high-probability tokens
+    /// - temperature = 1.0: normal randomness
+    /// - temperature > 1.0: more random, flatter distribution
+    pub fn set_temperature(&mut self, temperature: f64) {
+        self.temperature = temperature.max(0.01); // Prevent division by zero
+    }
+
+    /// Set the top-k value for sampling (only consider top-k most likely tokens)
+    /// - top_k = 0: no limit, consider all candidates
+    /// - top_k > 0: only consider top-k candidates (reduces low-quality outputs)
+    pub fn set_top_k(&mut self, top_k: usize) {
+        self.top_k = top_k;
     }
 
     fn find_matching_ngrams_with_context(&self, query: &[String], wildcard_pos: usize) -> Vec<(String, u32)> {
@@ -328,14 +455,40 @@ impl LanguageModel {
     }
 
     fn format_tokens(&self, tokens: &[String]) -> String {
+        if tokens.is_empty() {
+            return String::new();
+        }
+
         let mut result = String::new();
-        for (i, token) in tokens.iter().enumerate() {
-            if i > 0 {
-                // Add space before each token (punctuation is already attached to words)
+        let mut prev_token = "";
+        
+        for token in tokens {
+            // Determine if we need a space before this token
+            let needs_space = if prev_token.is_empty() {
+                false // First token
+            } else {
+                // Don't add space before punctuation that attaches to previous word
+                // But do add space for standalone punctuation or after punctuation
+                let first_char = token.chars().next().unwrap_or(' ');
+                let is_punctuation = !first_char.is_alphanumeric() && first_char != '\'';
+                let prev_ends_punctuation = prev_token.chars().last()
+                    .map(|c| !c.is_alphanumeric() && c != '\'')
+                    .unwrap_or(false);
+                
+                // Add space unless:
+                // 1. Current token starts with punctuation (it attaches to previous word)
+                // 2. Previous token already ended with punctuation (already spaced)
+                !is_punctuation && !prev_ends_punctuation
+            };
+            
+            if needs_space {
                 result.push(' ');
             }
+            
             result.push_str(token);
+            prev_token = token;
         }
+        
         result
     }
 
@@ -371,18 +524,65 @@ impl LanguageModel {
         // Process wildcards: predict words to replace them
         let mut response_tokens = query_tokens.clone();
         
-        // Process each wildcard position
+        // Process each wildcard position using Markov chain probabilities
         for &wildcard_pos in &wildcard_positions {
             // Find candidates for this wildcard position using context
             let candidates = self.find_matching_ngrams_with_context(&response_tokens, wildcard_pos);
             
             if !candidates.is_empty() {
-                // Select the most frequent candidate
-                let best_candidate = candidates.iter()
-                    .max_by_key(|(_, count)| count)
-                    .map(|(word, _)| word.clone());
+                // Use weighted random selection with temperature and top-k
+                // Apply Laplace smoothing for better probability estimation
+                let mut smoothed_candidates: Vec<(String, f64)> = candidates
+                    .iter()
+                    .map(|(token, count)| {
+                        let smoothed_count = (*count as f64) + 1.0;
+                        (token.clone(), smoothed_count)
+                    })
+                    .collect();
+
+                // Sort by probability for top-k filtering
+                smoothed_candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 
-                if let Some(predicted_word) = best_candidate {
+                // Apply top-k filtering
+                if self.top_k > 0 && smoothed_candidates.len() > self.top_k {
+                    smoothed_candidates.truncate(self.top_k);
+                }
+
+                // Apply temperature scaling
+                let temperature = self.temperature.max(0.01);
+                let temperature_scaled: Vec<(String, f64)> = smoothed_candidates
+                    .iter()
+                    .map(|(token, weight)| {
+                        let scaled_weight = weight.powf(1.0 / temperature);
+                        (token.clone(), scaled_weight)
+                    })
+                    .collect();
+
+                let total_weight: f64 = temperature_scaled.iter().map(|(_, weight)| *weight).sum();
+                
+                if total_weight > 0.0 {
+                    // Weighted random selection with temperature
+                    let mut rng = rand::thread_rng();
+                    let random_value = rng.gen::<f64>() * total_weight;
+                    
+                    let mut cumulative_weight = 0.0;
+                    let mut predicted_word: Option<String> = None;
+                    for (token, weight) in &temperature_scaled {
+                        cumulative_weight += weight;
+                        if random_value <= cumulative_weight {
+                            predicted_word = Some(token.clone());
+                            break;
+                        }
+                    }
+                    
+                    // Fallback to most frequent if something went wrong
+                    let predicted_word = predicted_word.unwrap_or_else(|| {
+                        candidates.iter()
+                            .max_by_key(|(_, count)| *count)
+                            .map(|(word, _)| word.clone())
+                            .unwrap_or_default()
+                    });
+                    
                     // Replace the wildcard with the predicted word
                     if wildcard_pos < response_tokens.len() {
                         response_tokens[wildcard_pos] = predicted_word;
@@ -409,8 +609,10 @@ impl LanguageModel {
             if let Some(next_token) = self.generate_continuation(&context, false) {
                 let base_word = self.extract_word(&next_token);
                 
-                // Check for repetition: if the trigram (last 2 tokens + new token) already exists
-                // anywhere in the response, stop to prevent loops
+                // Enhanced repetition detection: check for multiple patterns
+                let mut should_stop = false;
+                
+                // Check 1: Trigram repetition (3 consecutive words)
                 if response_tokens.len() >= 2 {
                     let trigram = vec![
                         self.extract_word(&response_tokens[response_tokens.len() - 2]),
@@ -419,7 +621,6 @@ impl LanguageModel {
                     ];
                     
                     // Check if this trigram already exists anywhere in the response
-                    let mut found_repetition = false;
                     for i in 0..=response_tokens.len().saturating_sub(3) {
                         if i + 2 < response_tokens.len() {
                             let existing_trigram = vec![
@@ -429,22 +630,67 @@ impl LanguageModel {
                             ];
                             
                             if trigram == existing_trigram {
-                                found_repetition = true;
+                                should_stop = true;
                                 break;
                             }
                         }
                     }
+                }
+                
+                // Check 2: Bigram repetition (same 2-word pattern appearing 3+ times)
+                if !should_stop && response_tokens.len() >= 1 {
+                    let bigram = vec![
+                        self.extract_word(&response_tokens[response_tokens.len() - 1]),
+                        base_word
+                    ];
                     
-                    if found_repetition {
-                        break; // Repetition detected - stop generation
+                    let mut bigram_count = 0;
+                    for i in 0..response_tokens.len().saturating_sub(1) {
+                        if i + 1 < response_tokens.len() {
+                            let existing_bigram = vec![
+                                self.extract_word(&response_tokens[i]),
+                                self.extract_word(&response_tokens[i + 1])
+                            ];
+                            
+                            if bigram == existing_bigram {
+                                bigram_count += 1;
+                                if bigram_count >= 2 { // Already appeared twice, this would be third
+                                    should_stop = true;
+                                    break;
+                                }
+                            }
+                        }
                     }
+                }
+                
+                // Check 3: Same word appearing too frequently in recent tokens
+                if !should_stop {
+                    let recent_window = 10.min(response_tokens.len());
+                    let recent_tokens: Vec<&str> = response_tokens[response_tokens.len().saturating_sub(recent_window)..]
+                        .iter()
+                        .map(|t| self.extract_word(t))
+                        .collect();
+                    
+                    let word_count = recent_tokens.iter()
+                        .filter(|&&w| w == base_word)
+                        .count();
+                    
+                    // If same word appears more than 30% of recent tokens, it's repetitive
+                    if word_count as f64 / recent_window as f64 > 0.3 {
+                        should_stop = true;
+                    }
+                }
+                
+                if should_stop {
+                    break; // Repetition detected - stop generation
                 }
                 
                 // Add the generated token to the response
                 response_tokens.push(next_token.clone());
                 
                 // Stop if token ends with sentence-ending punctuation
-                if self.is_sentence_ender(&next_token) {
+                // Also check if we've generated a reasonable minimum length
+                if self.is_sentence_ender(&next_token) && response_tokens.len() >= 3 {
                     break;
                 }
                 
