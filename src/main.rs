@@ -411,67 +411,6 @@ impl LanguageModel {
         self.top_k = top_k;
     }
 
-    /// Generate a phrase (multiple words) to replace a wildcard
-    /// Stops when hitting punctuation, reaching max length, or natural phrase boundary
-    fn generate_phrase_for_wildcard(&self, context_before: &[String], context_after: &[String], max_words: usize) -> Vec<String> {
-        let mut phrase = Vec::new();
-        let mut current_context = context_before.to_vec();
-        
-        // Maximum phrase length to prevent overly long replacements
-        let max_phrase_length = max_words.min(7); // Cap at 7 words
-        
-        // Generate words until we hit a stopping condition
-        for _ in 0..max_phrase_length {
-            // Get next word from context
-            if let Some(next_token) = self.generate_continuation(&current_context, false) {
-                let base_word = self.extract_word(&next_token);
-                
-                // Stop conditions:
-                // 1. Hit punctuation (comma, period, etc.) - natural phrase boundary
-                if self.is_pause(&next_token) || self.is_sentence_ender(&next_token) {
-                    // Include the punctuation as part of the phrase
-                    phrase.push(next_token);
-                    break;
-                }
-                
-                // 2. Check if next word would conflict with context_after
-                // If context_after exists and the next word matches it, we've reached the boundary
-                if !context_after.is_empty() {
-                    let next_word_lower = base_word.to_lowercase();
-                    let first_after_word = self.extract_word(&context_after[0]).to_lowercase();
-                    
-                    // If we're about to generate a word that matches what comes after,
-                    // we've probably completed the phrase
-                    if next_word_lower == first_after_word {
-                        break;
-                    }
-                }
-                
-                // 3. Check for very low probability (would need to track this, but for now skip)
-                
-                // Add the word to phrase
-                phrase.push(next_token.clone());
-                
-                // Update context for next prediction
-                current_context.push(next_token);
-                if current_context.len() > self.n - 1 {
-                    current_context = current_context[current_context.len().saturating_sub(self.n - 1)..].to_vec();
-                }
-            } else {
-                // No more continuations available
-                break;
-            }
-        }
-        
-        // If we generated nothing, try to get at least one word using direct context matching
-        if phrase.is_empty() && !context_before.is_empty() {
-            if let Some(first_word) = self.generate_continuation(context_before, false) {
-                phrase.push(first_word);
-            }
-        }
-        
-        phrase
-    }
 
     /// Find similar contexts in training data by matching ALL words with ALL sentences
     /// Returns contexts sorted by match score (sentences that match the most words)
