@@ -198,43 +198,303 @@ impl LanguageModel {
         token.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '\'')
     }
 
+    /// Extract next words directly from matching sentences based on context position
+    /// This provides more natural continuations following real sentence patterns
+    /// IMPROVED: Handles partial matches and extracts multiple next words for better flow
+    fn get_direct_sentence_continuations(&self, context: &[String], query_words: &[String]) -> Vec<(String, u32)> {
+        let mut continuations: HashMap<String, u32> = HashMap::new();
+        
+        // Find top matching sentences
+        let top_sentences = self.find_similar_contexts(query_words);
+        
+        // Normalize context for matching
+        let context_words_normalized: Vec<String> = context.iter()
+            .map(|t| self.extract_word(t).to_lowercase())
+            .collect();
+        
+        if context_words_normalized.is_empty() {
+            return Vec::new();
+        }
+        
+        for (sentence_idx, match_score) in top_sentences.iter().take(20) {
+            if let Some(context_entry) = self.contexts.get(*sentence_idx) {
+                let sentence_words: Vec<String> = context_entry.tokens.iter()
+                    .map(|t| self.extract_word(t).to_lowercase())
+                    .collect();
+                
+                // Find where our context appears in this sentence (exact match or suffix match)
+                for start_idx in 0..sentence_words.len() {
+                    // Try exact match first
+                    let mut matches_exact = true;
+                    let mut matched_length = 0;
+                    
+                    for (i, ctx_word) in context_words_normalized.iter().enumerate() {
+                        if start_idx + i >= sentence_words.len() {
+                            matches_exact = false;
+                            break;
+                        }
+                        if sentence_words[start_idx + i] == *ctx_word {
+                            matched_length += 1;
+                        } else {
+                            matches_exact = false;
+                            break;
+                        }
+                    }
+                    
+                    // If we have a match (exact or partial), extract next word(s)
+                    if matches_exact && matched_length > 0 {
+                        let next_pos = start_idx + matched_length;
+                        
+                        // Extract next 1-2 words for better context
+                        for offset in 0..2 {
+                        if next_pos + offset < context_entry.tokens.len() {
+                            let next_token = &context_entry.tokens[next_pos + offset];
+                            let _word = self.extract_word(next_token).to_lowercase();
+                                
+                                // Skip question words and words already in context
+                                if !self.is_question_word(&_word) && !context_words_normalized.contains(&_word) {
+                                    // Weight by: match score, how much of context matched, position in sentence
+                                    let match_ratio = matched_length as f64 / context_words_normalized.len() as f64;
+                                    let position_bonus = if start_idx < 5 { 1.5 } else { 1.0 }; // Earlier in sentence = better
+                                    let offset_penalty = if offset == 0 { 1.0 } else { 0.7 }; // First word after = better
+                                    
+                                    let weight = ((*match_score * match_ratio * position_bonus * offset_penalty) as u32) * 5;
+                                    *continuations.entry(next_token.clone()).or_insert(0) += weight;
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Also try suffix matching: if context ends match sentence
+                    if context_words_normalized.len() > 1 && start_idx + context_words_normalized.len() <= sentence_words.len() {
+                        let context_suffix = &context_words_normalized[context_words_normalized.len().saturating_sub(2)..];
+                        let sentence_window = &sentence_words[start_idx..(start_idx + context_suffix.len()).min(sentence_words.len())];
+                        
+                        if context_suffix == sentence_window {
+                            let next_pos = start_idx + context_suffix.len();
+                            if next_pos < context_entry.tokens.len() {
+                                let next_token = &context_entry.tokens[next_pos];
+                                let _word = self.extract_word(next_token).to_lowercase();
+                                
+                                if !self.is_question_word(&_word) && !context_words_normalized.contains(&_word) {
+                                    // Lower weight for suffix matches
+                                    let weight = ((*match_score * 0.7) as u32) * 3;
+                                    *continuations.entry(next_token.clone()).or_insert(0) += weight;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        continuations.into_iter().collect()
+    }
+
+    /// Get n-gram candidates with sentence-guided filtering
+    /// Only includes n-grams that appear in top matching sentences
+    fn get_sentence_filtered_ngrams(&self, context: &[String], query_words: &[String], stop_at_sentence_end: bool) -> Vec<(String, u32)> {
+        let mut ngram_candidates: HashMap<String, u32> = HashMap::new();
+        
+        // Get top matching sentences to use as filter and for weighting
+        let top_sentences = self.find_similar_contexts(query_words);
+        let mut sentence_words_set: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut word_to_sentence_scores: HashMap<String, f64> = HashMap::new();
+        
+        // Collect all words from top matching sentences with their sentence scores
+        for (sentence_idx, sentence_score) in top_sentences.iter().take(15) {
+            if let Some(context_entry) = self.contexts.get(*sentence_idx) {
+                for token in &context_entry.tokens {
+                    let word = self.extract_word(token).to_lowercase();
+                    sentence_words_set.insert(word.clone());
+                    // Track which sentences contain this word and their scores
+                    let current_max = word_to_sentence_scores.get(&word).copied().unwrap_or(0.0);
+                    word_to_sentence_scores.insert(word, current_max.max(*sentence_score));
+                }
+            }
+        }
+        
+        // Get n-gram candidates using backoff strategy with sentence-guided boosting
+        // Strategy 1: Full n-gram context
+        if context.len() >= self.n - 1 {
+            let context_key: Vec<String> = context[context.len().saturating_sub(self.n - 1)..].to_vec();
+            
+            if let Some(continuations) = self.ngram_contexts.get(&context_key) {
+                for (token, count) in continuations {
+                    let word = self.extract_word(token).to_lowercase();
+                    // Filter: only include if word appears in top matching sentences
+                    // Weight by sentence match score: words from higher-ranked sentences get more weight
+                    if sentence_words_set.contains(&word) {
+                        // Get the highest sentence score for this word
+                        let sentence_boost = word_to_sentence_scores.get(&word).copied().unwrap_or(0.0);
+                        
+                        // Boost n-gram count based on sentence ranking
+                        // Higher sentence score = more weight for this n-gram
+                        let boosted_count = (*count as f64) * (1.0 + sentence_boost * 0.1) as f64;
+                        
+                        *ngram_candidates.entry(token.clone()).or_insert(0) += boosted_count as u32;
+                    }
+                }
+            }
+        }
+        
+        // Strategy 2: Backoff to (n-2) context
+        if ngram_candidates.is_empty() && self.n > 2 && context.len() >= self.n - 2 {
+            let context_key: Vec<String> = context[context.len().saturating_sub(self.n - 2)..].to_vec();
+            
+            for (ctx_key, continuations) in &self.ngram_contexts {
+                if ctx_key.len() >= context_key.len() {
+                    let ctx_suffix = &ctx_key[ctx_key.len() - context_key.len()..];
+                    if ctx_suffix == context_key.as_slice() {
+                        for (token, count) in continuations {
+                            let word = self.extract_word(token).to_lowercase();
+                            if sentence_words_set.contains(&word) {
+                                // Apply sentence score weighting
+                                let sentence_boost = word_to_sentence_scores.get(&word).copied().unwrap_or(0.0);
+                                let boosted_count = (*count as f64) * (1.0 + sentence_boost * 0.1) as f64;
+                                *ngram_candidates.entry(token.clone()).or_insert(0) += boosted_count as u32;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Strategy 3: Bigram backoff
+        if ngram_candidates.is_empty() && context.len() >= 1 {
+            let last_token = &context[context.len() - 1];
+            
+            for (ctx_key, continuations) in &self.ngram_contexts {
+                if !ctx_key.is_empty() && ctx_key[ctx_key.len() - 1] == *last_token {
+                    for (token, count) in continuations {
+                        let word = self.extract_word(token).to_lowercase();
+                        if sentence_words_set.contains(&word) {
+                            // Apply sentence score weighting
+                            let sentence_boost = word_to_sentence_scores.get(&word).copied().unwrap_or(0.0);
+                            let boosted_count = (*count as f64) * (1.0 + sentence_boost * 0.1) as f64;
+                            *ngram_candidates.entry(token.clone()).or_insert(0) += boosted_count as u32;
+                        }
+                    }
+                }
+            }
+        }
+        
+        ngram_candidates.into_iter().collect()
+    }
+
     fn generate_continuation(&self, context: &[String], stop_at_sentence_end: bool) -> Option<String> {
         if context.is_empty() {
             return None;
         }
 
-        // NEW: Use sentence matching to get tokens from matching sentences
-        // This increases accuracy by using the best matching sentences
+        // HYBRID APPROACH: Combine sentence-based, direct continuations, and n-gram candidates
         let context_words: Vec<String> = context.iter()
             .map(|t| self.extract_word(t).to_lowercase())
             .collect();
         
+        // Get three types of candidates:
+        // 1. Sentence-based tokens (general matching)
         let sentence_based_tokens = self.get_tokens_from_matching_sentences(&context_words);
         
-        // If we have good sentence matches, use them as primary source
-        if !sentence_based_tokens.is_empty() {
-            // Convert to continuation format and use sentence-matched tokens
-            let sentence_continuations: Vec<(String, u32)> = sentence_based_tokens
-                .into_iter()
-                .filter(|(token, _)| {
-                    let word = self.extract_word(token);
-                    if stop_at_sentence_end {
-                        self.is_sentence_ender(token)
-                    } else {
-                        !self.is_sentence_ender(token)
-                    }
-                })
-                .collect();
-            
-            if !sentence_continuations.is_empty() {
-                // Use sentence-matched tokens with temperature for better control
-                return self.select_from_continuations(&sentence_continuations, stop_at_sentence_end);
+        // 2. Direct sentence continuations (extract next word from matching sentences)
+        let direct_continuations = self.get_direct_sentence_continuations(&context, &context_words);
+        
+        // 3. N-gram candidates (sentence-filtered for better context relevance)
+        let ngram_candidates = self.get_sentence_filtered_ngrams(&context, &context_words, stop_at_sentence_end);
+        
+        // ADAPTIVE WEIGHTED COMBINATION: Dynamically adjust weights based on quality of matches
+        let mut combined_candidates: HashMap<String, f64> = HashMap::new();
+        
+        // Calculate adaptive weights based on how many candidates we have from each source
+        let direct_count = direct_continuations.len();
+        let sentence_count = sentence_based_tokens.len();
+        let ngram_count = ngram_candidates.len();
+        let total_sources = (direct_count > 0) as usize + (sentence_count > 0) as usize + (ngram_count > 0) as usize;
+        
+        // Adaptive weights: if we have good direct continuations, prioritize them more
+        let direct_weight = if direct_count > 0 {
+            0.6  // Higher weight when we have direct continuations
+        } else {
+            0.0
+        };
+        
+        let sentence_weight = if sentence_count > 0 {
+            if direct_count > 0 {
+                0.25  // Lower when we have direct continuations
+            } else {
+                0.5   // Higher when direct continuations are missing
+            }
+        } else {
+            0.0
+        };
+        
+        let ngram_weight = if ngram_count > 0 {
+            if direct_count > 0 || sentence_count > 0 {
+                0.15  // Lower when we have sentence-based sources
+            } else {
+                0.5   // Higher when sentence sources are missing
+            }
+        } else {
+            0.0
+        };
+        
+        // Normalize weights to sum to 1.0
+        let total_weight = direct_weight + sentence_weight + ngram_weight;
+        let (direct_weight, sentence_weight, ngram_weight) = if total_weight > 0.0 {
+            (direct_weight / total_weight, sentence_weight / total_weight, ngram_weight / total_weight)
+        } else {
+            (0.0, 0.0, 0.0)
+        };
+        
+        // Add direct sentence continuations (highest priority, most natural)
+        for (token, score) in direct_continuations {
+            if stop_at_sentence_end {
+                if self.is_sentence_ender(&token) {
+                    *combined_candidates.entry(token.clone()).or_insert(0.0) += score as f64 * direct_weight;
+                }
+            } else {
+                if !self.is_sentence_ender(&token) {
+                    *combined_candidates.entry(token.clone()).or_insert(0.0) += score as f64 * direct_weight;
+                }
             }
         }
-
-        // Markov chain with proper backoff strategy: try longer contexts first, then shorter
-        // This implements a proper n-gram backoff model
         
+        // Add sentence-based candidates (secondary source)
+        for (token, score) in sentence_based_tokens {
+            if stop_at_sentence_end {
+                if self.is_sentence_ender(&token) {
+                    *combined_candidates.entry(token.clone()).or_insert(0.0) += score as f64 * sentence_weight;
+                }
+            } else {
+                if !self.is_sentence_ender(&token) {
+                    *combined_candidates.entry(token.clone()).or_insert(0.0) += score as f64 * sentence_weight;
+                }
+            }
+        }
+        
+        // Add n-gram candidates (filtered by sentences for context relevance)
+        for (token, count) in ngram_candidates {
+            if stop_at_sentence_end {
+                if self.is_sentence_ender(&token) {
+                    *combined_candidates.entry(token.clone()).or_insert(0.0) += count as f64 * ngram_weight;
+                }
+            } else {
+                if !self.is_sentence_ender(&token) {
+                    *combined_candidates.entry(token.clone()).or_insert(0.0) += count as f64 * ngram_weight;
+                }
+            }
+        }
+        
+        // If we have combined candidates, use them
+        if !combined_candidates.is_empty() {
+            let combined_vec: Vec<(String, u32)> = combined_candidates
+                .into_iter()
+                .map(|(token, score)| (token, score as u32))
+                .collect();
+            return self.select_from_continuations(&combined_vec, stop_at_sentence_end);
+        }
+        
+        // Fallback: If no sentence-filtered n-grams, try unfiltered n-grams
         // Strategy 1: Try full n-gram context (n-1 tokens)
         if context.len() >= self.n - 1 {
             let context_key: Vec<String> = context[context.len().saturating_sub(self.n - 1)..].to_vec();
