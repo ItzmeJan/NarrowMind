@@ -457,7 +457,7 @@ impl LanguageModel {
         }
         
         // Generate power set: all possible subsets of query words
-        let power_set = self.generate_power_set(&normalized_query);
+        let power_set = Self::generate_power_set(&normalized_query);
         
         // Score each sentence by counting how many subsets it matches
         for (ctx_idx, context) in self.contexts.iter().enumerate() {
