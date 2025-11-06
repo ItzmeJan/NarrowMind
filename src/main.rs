@@ -7,6 +7,13 @@ type NGram = Vec<String>;
 type NGramCount = HashMap<NGram, u32>;
 type NGramContext = HashMap<Vec<String>, Vec<(String, u32)>>;
 
+// Context entry: stores a sentence/context and its tokens
+#[derive(Clone)]
+struct ContextEntry {
+    tokens: Vec<String>,
+    text: String, // Original text for reference
+}
+
 struct LanguageModel {
     n: usize,
     ngram_counts: NGramCount,
@@ -16,6 +23,10 @@ struct LanguageModel {
     total_unigrams: u32, // Total word count for probability calculations
     temperature: f64, // Controls randomness: 1.0 = normal, <1.0 = more deterministic, >1.0 = more random
     top_k: usize, // Only consider top-k most likely tokens (0 = no limit)
+    // Full text context scanning
+    contexts: Vec<ContextEntry>, // All sentence-level contexts from training data
+    word_to_contexts: HashMap<String, Vec<usize>>, // Maps words to context indices where they appear
+    context_windows: HashMap<String, Vec<(Vec<String>, Vec<String>)>>, // Word -> (before_context, after_context) pairs
 }
 
 impl LanguageModel {
@@ -29,10 +40,64 @@ impl LanguageModel {
             total_unigrams: 0,
             temperature: 1.0, // Default: normal randomness
             top_k: 40, // Default: consider top 40 candidates
+            contexts: Vec::new(),
+            word_to_contexts: HashMap::new(),
+            context_windows: HashMap::new(),
         }
     }
 
     fn train(&mut self, text: &str) {
+        // FULL TEXT SCAN: Extract sentence-level contexts
+        // Split text into sentences and store full contexts
+        let sentences: Vec<&str> = text.split(|c: char| c == '.' || c == '!' || c == '?')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        
+        // Process each sentence for full context storage
+        for sentence in &sentences {
+            let sentence_tokens = self.tokenize(sentence);
+            if sentence_tokens.is_empty() {
+                continue;
+            }
+            
+            // Store the full context
+            let context_idx = self.contexts.len();
+            self.contexts.push(ContextEntry {
+                tokens: sentence_tokens.clone(),
+                text: sentence.to_string(),
+            });
+            
+            // Map each word to contexts where it appears
+            for (word_pos, token) in sentence_tokens.iter().enumerate() {
+                let word = self.extract_word(token).to_lowercase();
+                self.word_to_contexts
+                    .entry(word.clone())
+                    .or_insert_with(Vec::new)
+                    .push(context_idx);
+                
+                // Store context windows (words before and after each word)
+                let before: Vec<String> = if word_pos > 0 {
+                    let start = word_pos.saturating_sub(5).max(0);
+                    sentence_tokens[start..word_pos].to_vec()
+                } else {
+                    Vec::new()
+                };
+                
+                let after: Vec<String> = if word_pos + 1 < sentence_tokens.len() {
+                    let end = (word_pos + 1 + 5).min(sentence_tokens.len());
+                    sentence_tokens[word_pos + 1..end].to_vec()
+                } else {
+                    Vec::new()
+                };
+                
+                self.context_windows
+                    .entry(word.clone())
+                    .or_insert_with(Vec::new)
+                    .push((before, after));
+            }
+        }
+        
         // Tokenize training data and filter out question words
         // Question words are automatically removed to avoid confusion with query wildcards
         let all_tokens = self.tokenize(text);
@@ -379,6 +444,136 @@ impl LanguageModel {
         phrase
     }
 
+    /// Find similar contexts in training data based on query words
+    /// Returns contexts sorted by relevance score
+    fn find_similar_contexts(&self, query_words: &[String]) -> Vec<(usize, f64)> {
+        let mut context_scores: HashMap<usize, f64> = HashMap::new();
+        
+        // Score each context based on how many query words appear in it
+        for query_word in query_words {
+            let word_lower = self.extract_word(query_word).to_lowercase();
+            
+            if let Some(context_indices) = self.word_to_contexts.get(&word_lower) {
+                for &ctx_idx in context_indices {
+                    let score = context_scores.entry(ctx_idx).or_insert(0.0);
+                    *score += 1.0;
+                }
+            }
+        }
+        
+        // Convert to sorted vector
+        let mut scored_contexts: Vec<(usize, f64)> = context_scores.into_iter().collect();
+        scored_contexts.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        
+        // Return top contexts
+        scored_contexts.into_iter().take(10).collect()
+    }
+    
+    /// Find words that appear in similar contexts to the query
+    /// Uses context windows to find related words
+    /// Uses wildcards to our favor: finds similar question-answer patterns
+    fn find_contextual_candidates(&self, query_words: &[String], wildcard_pos: usize, query: &[String]) -> Vec<(String, u32)> {
+        let mut candidates: Vec<(String, u32)> = Vec::new();
+        
+        // Get non-wildcard words from query for context matching
+        let context_words: Vec<String> = query.iter()
+            .enumerate()
+            .filter(|(i, _)| *i != wildcard_pos)
+            .map(|(_, token)| self.extract_word(token).to_lowercase())
+            .collect();
+        
+        // WILDCARD ADVANTAGE: Find contexts that match the question pattern
+        // Look for sentences that contain the same non-wildcard words
+        // This finds similar question-answer patterns in training data
+        let similar_contexts = self.find_similar_contexts(&context_words);
+        
+        // Extract words from similar contexts that could fill the wildcard
+        for (ctx_idx, score) in similar_contexts {
+            if let Some(context) = self.contexts.get(ctx_idx) {
+                // Look for words in this context that appear near our context words
+                for (i, token) in context.tokens.iter().enumerate() {
+                    let word = self.extract_word(token).to_lowercase();
+                    
+                    // Skip if it's a question word or already in query
+                    if self.is_question_word(&word) || context_words.contains(&word) {
+                        continue;
+                    }
+                    
+                    // Check if this word appears in a relevant position
+                    // (near other query words in the context)
+                    let mut relevance = (score as u32).max(1); // Base relevance from context match
+                    
+                    // Check words before and after in the context
+                    let window_start = i.saturating_sub(3);
+                    let window_end = (i + 4).min(context.tokens.len());
+                    
+                    for j in window_start..window_end {
+                        if j != i {
+                            let nearby_word = self.extract_word(&context.tokens[j]).to_lowercase();
+                            if context_words.contains(&nearby_word) {
+                                relevance += 3; // Higher score if near query words (stronger signal)
+                            }
+                        }
+                    }
+                    
+                    // Bonus: if this word appears early in a highly-relevant context, boost it
+                    if score >= 2.0 && i < 5 {
+                        relevance += 2;
+                    }
+                    
+                    // Add candidate with relevance score
+                    if let Some(existing) = candidates.iter_mut().find(|(w, _)| w == token) {
+                        existing.1 += relevance; // Accumulate scores
+                    } else {
+                        candidates.push((token.clone(), relevance));
+                    }
+                }
+            }
+        }
+        
+        // Also use context windows: find words that appear in similar contexts
+        // This leverages the "last used" context information
+        for query_word in &context_words {
+            if let Some(windows) = self.context_windows.get(query_word) {
+                for (before, after) in windows {
+                    // Look for words that appear after this query word in training data
+                    // These are words that were "last used" after this query word
+                    if !after.is_empty() {
+                        for (idx, token) in after.iter().take(5).enumerate() {
+                            let word = self.extract_word(token).to_lowercase();
+                            if !self.is_question_word(&word) && !context_words.contains(&word) {
+                                // Closer words get higher scores (more relevant)
+                                let proximity_score = (5 - idx) as u32;
+                                if let Some(existing) = candidates.iter_mut().find(|(w, _)| w == token) {
+                                    existing.1 += proximity_score;
+                                } else {
+                                    candidates.push((token.clone(), proximity_score));
+                                }
+                            }
+                        }
+                    }
+                    
+                    // Also check words before - these might be part of a phrase
+                    if !before.is_empty() && before.len() >= 2 {
+                        // Look at the last few words before
+                        for token in before.iter().rev().take(2) {
+                            let word = self.extract_word(token).to_lowercase();
+                            if !self.is_question_word(&word) && !context_words.contains(&word) {
+                                if let Some(existing) = candidates.iter_mut().find(|(w, _)| w == token) {
+                                    existing.1 += 1;
+                                } else {
+                                    candidates.push((token.clone(), 1));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        candidates
+    }
+
     fn find_matching_ngrams_with_context(&self, query: &[String], wildcard_pos: usize) -> Vec<(String, u32)> {
         // Use words before and after the wildcard as context to predict what should replace it
         let mut candidates = Vec::new();
@@ -606,8 +801,21 @@ impl LanguageModel {
                 Vec::new()
             };
             
-            // Strategy 1: Try to find matching n-grams that suggest a phrase
-            let candidates = self.find_matching_ngrams_with_context(&response_tokens, wildcard_pos);
+            // Strategy 1: Use FULL TEXT SCAN - find contextual candidates from similar contexts
+            let contextual_candidates = self.find_contextual_candidates(&response_tokens, wildcard_pos, &response_tokens);
+            
+            // Strategy 2: Try to find matching n-grams that suggest a phrase
+            let ngram_candidates = self.find_matching_ngrams_with_context(&response_tokens, wildcard_pos);
+            
+            // Combine candidates: contextual (from full text scan) + n-gram based
+            let mut candidates = contextual_candidates;
+            for (token, count) in ngram_candidates {
+                if let Some(existing) = candidates.iter_mut().find(|(t, _)| t == &token) {
+                    existing.1 += count; // Add n-gram count to contextual score
+                } else {
+                    candidates.push((token, count));
+                }
+            }
             
             if !candidates.is_empty() {
                 // Use the top candidate as a starting point, then generate a phrase
