@@ -497,9 +497,6 @@ impl LanguageModel {
                 // Higher match score = higher base weight for tokens from this sentence
                 let base_weight = (match_score * 5.0) as u32;
                 
-                // Track which tokens appear in this sentence
-                let mut sentence_tokens = std::collections::HashSet::new();
-                
                 for token in &context.tokens {
                     let word = self.extract_word(token).to_lowercase();
                     
