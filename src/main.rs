@@ -917,8 +917,8 @@ impl LanguageModel {
             if let Some(next_token) = self.generate_continuation(&context, false) {
                 let base_word = self.extract_word(&next_token);
                 
-                // Early stopping: if we've generated a reasonable response length, stop at sentence end
-                if response_tokens.len() >= 8 && self.is_sentence_ender(&next_token) {
+                // Early stopping: stop immediately at sentence end (no minimum length requirement)
+                if self.is_sentence_ender(&next_token) {
                     response_tokens.push(next_token);
                     break;
                 }
@@ -1002,18 +1002,13 @@ impl LanguageModel {
                 // Add the generated token to the response
                 response_tokens.push(next_token.clone());
                 
-                // Stop if token ends with sentence-ending punctuation
-                // Stop earlier for shorter responses
+                // Stop if token ends with sentence-ending punctuation (no minimum length)
                 if self.is_sentence_ender(&next_token) {
                     break;
                 }
                 
-                // Also stop if we've reached a reasonable length (shorter limit)
-                if response_tokens.len() >= 12 {
-                    // Try to end gracefully - add period if we haven't hit one yet
-                    if !response_tokens.iter().any(|t| self.is_sentence_ender(t)) {
-                        // Don't add period, just stop
-                    }
+                // Maximum length limit (no minimum requirement)
+                if response_tokens.len() >= 15 {
                     break;
                 }
                 
