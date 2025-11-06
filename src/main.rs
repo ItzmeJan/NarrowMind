@@ -423,13 +423,8 @@ impl LanguageModel {
             .map(|w| self.extract_word(w).to_lowercase())
             .collect();
         
-        // Count frequency of each query word across all sentences
-        let mut query_word_frequency: HashMap<String, u32> = HashMap::new();
-        for query_word in &normalized_query {
-            *query_word_frequency.entry(query_word.clone()).or_insert(0) += 1;
-        }
-        
         // Score each sentence by matching ALL words
+        // PRIORITIZE: Different/unique tokens from prompt over same word repeated
         for (ctx_idx, context) in self.contexts.iter().enumerate() {
             // Extract all words from this sentence (normalized)
             let sentence_words: Vec<String> = context.tokens.iter()
