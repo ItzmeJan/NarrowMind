@@ -549,22 +549,30 @@ impl LanguageModel {
                     // PROXIMITY BONUS: Tokens near query words get much higher scores
                     // This ensures words like "Mia" (before "was getting ready") rank highest
                     if !query_word_positions.is_empty() {
+                        let first_query_pos = query_word_positions[0];
                         let min_distance = query_word_positions.iter()
                             .map(|&qpos| (token_pos as i32 - qpos as i32).abs())
                             .min()
                             .unwrap_or(100);
                         
-                        // Closer tokens get exponentially higher scores
-                        // Distance 0 (right next to) = 10x bonus, distance 1 = 5x, distance 2 = 2x
-                        if min_distance <= 2 {
-                            let proximity_multiplier = match min_distance {
+                        // EXTRA BONUS: Words right before the first query word (typically the answer for "who/what")
+                        // This is especially important for questions like "who was getting ready" -> "Mia"
+                        let mut proximity_multiplier = 1.0;
+                        if token_pos + 1 == first_query_pos {
+                            // Token appears right before first query word - this is likely the answer!
+                            proximity_multiplier = 20.0; // Very high bonus
+                        } else if min_distance <= 2 {
+                            // Closer tokens get exponentially higher scores
+                            // Distance 0 (right next to) = 10x bonus, distance 1 = 5x, distance 2 = 2x
+                            proximity_multiplier = match min_distance {
                                 0 => 10.0,  // Right next to query word
                                 1 => 5.0,   // One word away
                                 2 => 2.0,   // Two words away
                                 _ => 1.0,
                             };
-                            token_weight = ((token_weight as f64) * proximity_multiplier) as u32;
                         }
+                        
+                        token_weight = ((token_weight as f64) * proximity_multiplier) as u32;
                     }
                     
                     *token_scores.entry(token.clone()).or_insert(0) += token_weight;
