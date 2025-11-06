@@ -451,6 +451,63 @@ impl LanguageModel {
             
             let match_count = unique_matches.len();
             
+            // SEQUENCE DETECTION: Find sequences of query words appearing in order
+            // This gives extra points for tokens appearing in sequence from the prompt
+            let mut sequence_bonus = 0.0;
+            let mut max_sequence_length = 0;
+            
+            // Find all sequences of consecutive query words in the sentence
+            for start_idx in 0..sentence_words.len() {
+                let mut sequence_length = 0;
+                let mut query_idx = 0;
+                
+                // Try to match a sequence starting from this position
+                for i in start_idx..sentence_words.len() {
+                    if query_idx < normalized_query.len() && sentence_words[i] == normalized_query[query_idx] {
+                        sequence_length += 1;
+                        query_idx += 1;
+                    } else {
+                        // Check if we can continue with next query word (skip non-matching words)
+                        if query_idx < normalized_query.len() && sentence_words[i] == normalized_query[query_idx] {
+                            sequence_length += 1;
+                            query_idx += 1;
+                        }
+                    }
+                }
+                
+                if sequence_length > max_sequence_length {
+                    max_sequence_length = sequence_length;
+                }
+                
+                // Bonus for sequences: longer sequences get exponentially more points
+                // Sequence of 2 words = 5 points, 3 words = 15 points, 4 words = 30 points, etc.
+                if sequence_length >= 2 {
+                    sequence_bonus += (sequence_length as f64) * (sequence_length as f64) * 1.25;
+                }
+            }
+            
+            // Also check for groups of sequential words (any number, not necessarily in exact order)
+            // Find groups where multiple query words appear close together
+            let mut group_bonus = 0.0;
+            let window_size = 5; // Look for groups within 5 words
+            
+            for start_idx in 0..sentence_words.len().saturating_sub(window_size) {
+                let window = &sentence_words[start_idx..(start_idx + window_size).min(sentence_words.len())];
+                let mut words_in_window = 0;
+                
+                for query_word in &normalized_query {
+                    if window.contains(query_word) {
+                        words_in_window += 1;
+                    }
+                }
+                
+                // Bonus for groups: more words in a small window = higher bonus
+                if words_in_window >= 2 {
+                    // Exponential bonus: 2 words = 3 points, 3 words = 9 points, 4 words = 18 points
+                    group_bonus += (words_in_window as f64) * (words_in_window as f64) * 0.75;
+                }
+            }
+            
             // Calculate match ratio (percentage of unique query words found)
             if total_query_words > 0 {
                 let match_ratio = match_count as f64 / total_query_words as f64;
@@ -467,8 +524,11 @@ impl LanguageModel {
                 // Match ratio bonus (higher ratio = better)
                 let ratio_bonus = match_ratio * 5.0;
                 
-                // Final score: unique matches are most important
-                let score = unique_match_score + frequency_bonus + ratio_bonus;
+                // SEQUENCE BONUS: Extra points for tokens appearing in sequence
+                // This heavily rewards sentences where prompt words appear in order
+                
+                // Final score: unique matches + sequence bonus + group bonus
+                let score = unique_match_score + frequency_bonus + ratio_bonus + sequence_bonus + group_bonus;
                 
                 // Also track exact match count for tie-breaking
                 context_scores.insert(ctx_idx, (score, match_count));
