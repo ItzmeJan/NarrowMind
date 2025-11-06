@@ -317,6 +317,68 @@ impl LanguageModel {
         self.top_k = top_k;
     }
 
+    /// Generate a phrase (multiple words) to replace a wildcard
+    /// Stops when hitting punctuation, reaching max length, or natural phrase boundary
+    fn generate_phrase_for_wildcard(&self, context_before: &[String], context_after: &[String], max_words: usize) -> Vec<String> {
+        let mut phrase = Vec::new();
+        let mut current_context = context_before.to_vec();
+        
+        // Maximum phrase length to prevent overly long replacements
+        let max_phrase_length = max_words.min(7); // Cap at 7 words
+        
+        // Generate words until we hit a stopping condition
+        for _ in 0..max_phrase_length {
+            // Get next word from context
+            if let Some(next_token) = self.generate_continuation(&current_context, false) {
+                let base_word = self.extract_word(&next_token);
+                
+                // Stop conditions:
+                // 1. Hit punctuation (comma, period, etc.) - natural phrase boundary
+                if self.is_pause(&next_token) || self.is_sentence_ender(&next_token) {
+                    // Include the punctuation as part of the phrase
+                    phrase.push(next_token);
+                    break;
+                }
+                
+                // 2. Check if next word would conflict with context_after
+                // If context_after exists and the next word matches it, we've reached the boundary
+                if !context_after.is_empty() {
+                    let next_word_lower = base_word.to_lowercase();
+                    let first_after_word = self.extract_word(&context_after[0]).to_lowercase();
+                    
+                    // If we're about to generate a word that matches what comes after,
+                    // we've probably completed the phrase
+                    if next_word_lower == first_after_word {
+                        break;
+                    }
+                }
+                
+                // 3. Check for very low probability (would need to track this, but for now skip)
+                
+                // Add the word to phrase
+                phrase.push(next_token.clone());
+                
+                // Update context for next prediction
+                current_context.push(next_token);
+                if current_context.len() > self.n - 1 {
+                    current_context = current_context[current_context.len().saturating_sub(self.n - 1)..].to_vec();
+                }
+            } else {
+                // No more continuations available
+                break;
+            }
+        }
+        
+        // If we generated nothing, try to get at least one word using direct context matching
+        if phrase.is_empty() && !context_before.is_empty() {
+            if let Some(first_word) = self.generate_continuation(context_before, false) {
+                phrase.push(first_word);
+            }
+        }
+        
+        phrase
+    }
+
     fn find_matching_ngrams_with_context(&self, query: &[String], wildcard_pos: usize) -> Vec<(String, u32)> {
         // Use words before and after the wildcard as context to predict what should replace it
         let mut candidates = Vec::new();
@@ -521,17 +583,34 @@ impl LanguageModel {
             return "I don't have enough information to answer that.".to_string();
         }
 
-        // Process wildcards: predict words to replace them
+        // Process wildcards: predict phrases (potentially multiple words) to replace them
         let mut response_tokens = query_tokens.clone();
         
-        // Process each wildcard position using Markov chain probabilities
+        // Process wildcards in reverse order to maintain correct indices after insertions
+        // We'll collect the replacements first, then apply them
+        let mut replacements: Vec<(usize, Vec<String>)> = Vec::new();
+        
         for &wildcard_pos in &wildcard_positions {
-            // Find candidates for this wildcard position using context
+            // Get context before and after the wildcard
+            let context_before: Vec<String> = if wildcard_pos > 0 {
+                let start = wildcard_pos.saturating_sub(self.n - 1);
+                response_tokens[start..wildcard_pos].to_vec()
+            } else {
+                Vec::new()
+            };
+            
+            let context_after: Vec<String> = if wildcard_pos + 1 < response_tokens.len() {
+                let end = (wildcard_pos + 1 + self.n - 1).min(response_tokens.len());
+                response_tokens[wildcard_pos + 1..end].to_vec()
+            } else {
+                Vec::new()
+            };
+            
+            // Strategy 1: Try to find matching n-grams that suggest a phrase
             let candidates = self.find_matching_ngrams_with_context(&response_tokens, wildcard_pos);
             
             if !candidates.is_empty() {
-                // Use weighted random selection with temperature and top-k
-                // Apply Laplace smoothing for better probability estimation
+                // Use the top candidate as a starting point, then generate a phrase
                 let mut smoothed_candidates: Vec<(String, f64)> = candidates
                     .iter()
                     .map(|(token, count)| {
@@ -540,15 +619,12 @@ impl LanguageModel {
                     })
                     .collect();
 
-                // Sort by probability for top-k filtering
                 smoothed_candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 
-                // Apply top-k filtering
                 if self.top_k > 0 && smoothed_candidates.len() > self.top_k {
                     smoothed_candidates.truncate(self.top_k);
                 }
 
-                // Apply temperature scaling
                 let temperature = self.temperature.max(0.01);
                 let temperature_scaled: Vec<(String, f64)> = smoothed_candidates
                     .iter()
@@ -561,32 +637,85 @@ impl LanguageModel {
                 let total_weight: f64 = temperature_scaled.iter().map(|(_, weight)| *weight).sum();
                 
                 if total_weight > 0.0 {
-                    // Weighted random selection with temperature
+                    // Select starting word with weighted random
                     let mut rng = rand::thread_rng();
                     let random_value = rng.gen::<f64>() * total_weight;
                     
                     let mut cumulative_weight = 0.0;
-                    let mut predicted_word: Option<String> = None;
+                    let mut starting_word: Option<String> = None;
                     for (token, weight) in &temperature_scaled {
                         cumulative_weight += weight;
                         if random_value <= cumulative_weight {
-                            predicted_word = Some(token.clone());
+                            starting_word = Some(token.clone());
                             break;
                         }
                     }
                     
-                    // Fallback to most frequent if something went wrong
-                    let predicted_word = predicted_word.unwrap_or_else(|| {
+                    let starting_word = starting_word.unwrap_or_else(|| {
                         candidates.iter()
                             .max_by_key(|(_, count)| *count)
                             .map(|(word, _)| word.clone())
                             .unwrap_or_default()
                     });
                     
-                    // Replace the wildcard with the predicted word
-                    if wildcard_pos < response_tokens.len() {
-                        response_tokens[wildcard_pos] = predicted_word;
+                    // Build context with starting word and generate phrase continuation
+                    let mut phrase_context = context_before.clone();
+                    phrase_context.push(starting_word.clone());
+                    if phrase_context.len() > self.n - 1 {
+                        phrase_context = phrase_context[phrase_context.len().saturating_sub(self.n - 1)..].to_vec();
                     }
+                    
+                    let mut phrase = vec![starting_word];
+                    
+                    // Continue generating words for the phrase
+                    let max_phrase_words = 5; // Reasonable limit for phrase length
+                    for _ in 1..max_phrase_words {
+                        if let Some(next_token) = self.generate_continuation(&phrase_context, false) {
+                            // Stop if we hit punctuation
+                            if self.is_pause(&next_token) || self.is_sentence_ender(&next_token) {
+                                phrase.push(next_token);
+                                break;
+                            }
+                            
+                            // Stop if next word matches context_after (we've reached the boundary)
+                            if !context_after.is_empty() {
+                                let next_word = self.extract_word(&next_token).to_lowercase();
+                                let first_after = self.extract_word(&context_after[0]).to_lowercase();
+                                if next_word == first_after {
+                                    break;
+                                }
+                            }
+                            
+                            phrase.push(next_token.clone());
+                            phrase_context.push(next_token);
+                            if phrase_context.len() > self.n - 1 {
+                                phrase_context = phrase_context[phrase_context.len().saturating_sub(self.n - 1)..].to_vec();
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    
+                    replacements.push((wildcard_pos, phrase));
+                }
+            } else {
+                // Fallback: generate phrase from context alone
+                let phrase = self.generate_phrase_for_wildcard(&context_before, &context_after, 5);
+                if !phrase.is_empty() {
+                    replacements.push((wildcard_pos, phrase));
+                }
+            }
+        }
+        
+        // Apply replacements in reverse order to maintain correct indices
+        replacements.sort_by(|a, b| b.0.cmp(&a.0));
+        for (wildcard_pos, phrase) in replacements {
+            if wildcard_pos < response_tokens.len() && !phrase.is_empty() {
+                // Replace the wildcard token with the phrase
+                response_tokens[wildcard_pos] = phrase[0].clone();
+                // Insert remaining words after the wildcard position
+                for (i, word) in phrase.iter().skip(1).enumerate() {
+                    response_tokens.insert(wildcard_pos + 1 + i, word.clone());
                 }
             }
         }
