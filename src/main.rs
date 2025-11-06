@@ -501,25 +501,42 @@ impl LanguageModel {
     
     /// Get tokens from top matching sentences for generation
     /// This uses the best matching sentences as a source for tokens
-    /// IMPROVED: Frequency-based ranking - words that appear in more matching sentences rank higher
+    /// IMPROVED: Prioritizes tokens that appear near query words in sentences
     fn get_tokens_from_matching_sentences(&self, query_words: &[String]) -> Vec<(String, u32)> {
         let mut token_scores: HashMap<String, u32> = HashMap::new();
         let mut token_frequency: HashMap<String, u32> = HashMap::new(); // Count how many sentences contain each token
         
+        // Normalize query words for matching
+        let normalized_query: Vec<String> = query_words.iter()
+            .map(|w| w.to_lowercase())
+            .collect();
+        
         // Find top matching sentences
         let top_sentences = self.find_similar_contexts(query_words);
         
-        // Extract tokens from top matching sentences with frequency-based scoring
+        // Extract tokens from top matching sentences with proximity-based scoring
         for (sentence_idx, match_score) in top_sentences {
             if let Some(context) = self.contexts.get(sentence_idx) {
                 // Higher match score = higher base weight for tokens from this sentence
                 let base_weight = (match_score * 5.0) as u32;
                 
-                for token in &context.tokens {
+                // Find positions of query words in this sentence
+                let sentence_words: Vec<String> = context.tokens.iter()
+                    .map(|t| self.extract_word(t).to_lowercase())
+                    .collect();
+                
+                let mut query_word_positions = Vec::new();
+                for (pos, word) in sentence_words.iter().enumerate() {
+                    if normalized_query.contains(word) {
+                        query_word_positions.push(pos);
+                    }
+                }
+                
+                for (token_pos, token) in context.tokens.iter().enumerate() {
                     let word = self.extract_word(token).to_lowercase();
                     
-                    // Skip question words
-                    if self.is_question_word(&word) {
+                    // Skip question words and query words themselves
+                    if self.is_question_word(&word) || normalized_query.contains(&word) {
                         continue;
                     }
                     
@@ -527,7 +544,30 @@ impl LanguageModel {
                     *token_frequency.entry(token.clone()).or_insert(0) += 1;
                     
                     // Base weight from sentence match quality
-                    *token_scores.entry(token.clone()).or_insert(0) += base_weight;
+                    let mut token_weight = base_weight;
+                    
+                    // PROXIMITY BONUS: Tokens near query words get much higher scores
+                    // This ensures words like "Mia" (before "was getting ready") rank highest
+                    if !query_word_positions.is_empty() {
+                        let min_distance = query_word_positions.iter()
+                            .map(|&qpos| (token_pos as i32 - qpos as i32).abs())
+                            .min()
+                            .unwrap_or(100);
+                        
+                        // Closer tokens get exponentially higher scores
+                        // Distance 0 (right next to) = 10x bonus, distance 1 = 5x, distance 2 = 2x
+                        if min_distance <= 2 {
+                            let proximity_multiplier = match min_distance {
+                                0 => 10.0,  // Right next to query word
+                                1 => 5.0,   // One word away
+                                2 => 2.0,   // Two words away
+                                _ => 1.0,
+                            };
+                            token_weight = ((token_weight as f64) * proximity_multiplier) as u32;
+                        }
+                    }
+                    
+                    *token_scores.entry(token.clone()).or_insert(0) += token_weight;
                 }
             }
         }
