@@ -507,7 +507,6 @@ impl LanguageModel {
                     
                     // Count frequency: how many matching sentences contain this token
                     *token_frequency.entry(token.clone()).or_insert(0) += 1;
-                    sentence_tokens.insert(token.clone());
                     
                     // Base weight from sentence match quality
                     *token_scores.entry(token.clone()).or_insert(0) += base_weight;
