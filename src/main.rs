@@ -203,6 +203,35 @@ impl LanguageModel {
             return None;
         }
 
+        // NEW: Use sentence matching to get tokens from matching sentences
+        // This increases accuracy by using the best matching sentences
+        let context_words: Vec<String> = context.iter()
+            .map(|t| self.extract_word(t).to_lowercase())
+            .collect();
+        
+        let sentence_based_tokens = self.get_tokens_from_matching_sentences(&context_words);
+        
+        // If we have good sentence matches, use them as primary source
+        if !sentence_based_tokens.is_empty() {
+            // Convert to continuation format and use sentence-matched tokens
+            let sentence_continuations: Vec<(String, u32)> = sentence_based_tokens
+                .into_iter()
+                .filter(|(token, _)| {
+                    let word = self.extract_word(token);
+                    if stop_at_sentence_end {
+                        self.is_sentence_ender(token)
+                    } else {
+                        !self.is_sentence_ender(token)
+                    }
+                })
+                .collect();
+            
+            if !sentence_continuations.is_empty() {
+                // Use sentence-matched tokens with temperature for better control
+                return self.select_from_continuations(&sentence_continuations, stop_at_sentence_end);
+            }
+        }
+
         // Markov chain with proper backoff strategy: try longer contexts first, then shorter
         // This implements a proper n-gram backoff model
         
@@ -444,35 +473,95 @@ impl LanguageModel {
         phrase
     }
 
-    /// Find similar contexts in training data based on query words
-    /// Returns contexts sorted by relevance score
+    /// Find similar contexts in training data by matching ALL words with ALL sentences
+    /// Returns contexts sorted by match score (sentences that match the most words)
     fn find_similar_contexts(&self, query_words: &[String]) -> Vec<(usize, f64)> {
-        let mut context_scores: HashMap<usize, f64> = HashMap::new();
+        let mut context_scores: HashMap<usize, (f64, usize)> = HashMap::new();
         
-        // Score each context based on how many query words appear in it
-        for query_word in query_words {
-            let word_lower = self.extract_word(query_word).to_lowercase();
+        // Normalize query words (lowercase, extract base word)
+        let normalized_query: Vec<String> = query_words.iter()
+            .map(|w| self.extract_word(w).to_lowercase())
+            .collect();
+        
+        // Score each sentence by matching ALL words
+        for (ctx_idx, context) in self.contexts.iter().enumerate() {
+            // Extract all words from this sentence (normalized)
+            let sentence_words: Vec<String> = context.tokens.iter()
+                .map(|t| self.extract_word(t).to_lowercase())
+                .collect();
             
-            if let Some(context_indices) = self.word_to_contexts.get(&word_lower) {
-                for &ctx_idx in context_indices {
-                    let score = context_scores.entry(ctx_idx).or_insert(0.0);
-                    *score += 1.0;
+            // Count how many query words appear in this sentence
+            let mut match_count = 0;
+            let mut total_query_words = normalized_query.len();
+            
+            for query_word in &normalized_query {
+                if sentence_words.contains(query_word) {
+                    match_count += 1;
+                }
+            }
+            
+            // Calculate match ratio (percentage of query words found)
+            if total_query_words > 0 {
+                let match_ratio = match_count as f64 / total_query_words as f64;
+                
+                // Score = match_count + bonus for high match ratio
+                // This favors sentences that match more words AND higher percentage
+                let score = match_count as f64 + (match_ratio * 2.0);
+                
+                // Also track exact match count for tie-breaking
+                context_scores.insert(ctx_idx, (score, match_count));
+            }
+        }
+        
+        // Convert to sorted vector (by score, then by match count)
+        let mut scored_contexts: Vec<(usize, f64)> = context_scores.into_iter()
+            .map(|(idx, (score, _))| (idx, score))
+            .collect();
+        scored_contexts.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        
+        // Return top matching sentences (more than before for better coverage)
+        scored_contexts.into_iter().take(20).collect()
+    }
+    
+    /// Get tokens from top matching sentences for generation
+    /// This uses the best matching sentences as a source for tokens
+    fn get_tokens_from_matching_sentences(&self, query_words: &[String]) -> Vec<(String, u32)> {
+        let mut token_scores: HashMap<String, u32> = HashMap::new();
+        
+        // Find top matching sentences
+        let top_sentences = self.find_similar_contexts(query_words);
+        
+        // Extract tokens from top matching sentences with scores based on sentence match quality
+        for (sentence_idx, match_score) in top_sentences {
+            if let Some(context) = self.contexts.get(sentence_idx) {
+                // Higher match score = higher weight for tokens from this sentence
+                let weight = (match_score * 10.0) as u32;
+                
+                for token in &context.tokens {
+                    let word = self.extract_word(token).to_lowercase();
+                    
+                    // Skip question words
+                    if self.is_question_word(&word) {
+                        continue;
+                    }
+                    
+                    // Add token with weight based on sentence match quality
+                    *token_scores.entry(token.clone()).or_insert(0) += weight;
                 }
             }
         }
         
-        // Convert to sorted vector
-        let mut scored_contexts: Vec<(usize, f64)> = context_scores.into_iter().collect();
-        scored_contexts.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        
-        // Return top contexts
-        scored_contexts.into_iter().take(10).collect()
+        // Convert to vector
+        token_scores.into_iter().collect()
     }
     
     /// Find words that appear in similar contexts to the query
     /// Uses context windows to find related words
     /// Uses wildcards to our favor: finds similar question-answer patterns
-    fn find_contextual_candidates(&self, query_words: &[String], wildcard_pos: usize, query: &[String]) -> Vec<(String, u32)> {
+    /// NOW USES SENTENCE MATCHING: matches all words with all sentences
+    fn find_contextual_candidates(&self, wildcard_pos: usize, query: &[String]) -> Vec<(String, u32)> {
         let mut candidates: Vec<(String, u32)> = Vec::new();
         
         // Get non-wildcard words from query for context matching
@@ -482,12 +571,25 @@ impl LanguageModel {
             .map(|(_, token)| self.extract_word(token).to_lowercase())
             .collect();
         
-        // WILDCARD ADVANTAGE: Find contexts that match the question pattern
+        // PRIMARY METHOD: Get tokens directly from top matching sentences
+        // This uses sentence matching (all words matched with all sentences)
+        // Matches ALL words with ALL sentences, picks sentences that match the most
+        let sentence_tokens = self.get_tokens_from_matching_sentences(&context_words);
+        for (token, score) in sentence_tokens {
+            if let Some(existing) = candidates.iter_mut().find(|(t, _)| t == &token) {
+                existing.1 += score; // Accumulate scores
+            } else {
+                candidates.push((token, score));
+            }
+        }
+        
+        // SECONDARY METHOD: WILDCARD ADVANTAGE - Find contexts that match the question pattern
         // Look for sentences that contain the same non-wildcard words
         // This finds similar question-answer patterns in training data
         let similar_contexts = self.find_similar_contexts(&context_words);
         
         // Extract words from similar contexts that could fill the wildcard
+        // This adds additional context-aware scoring on top of sentence matching
         for (ctx_idx, score) in similar_contexts {
             if let Some(context) = self.contexts.get(ctx_idx) {
                 // Look for words in this context that appear near our context words
@@ -501,7 +603,7 @@ impl LanguageModel {
                     
                     // Check if this word appears in a relevant position
                     // (near other query words in the context)
-                    let mut relevance = (score as u32).max(1); // Base relevance from context match
+                    let mut relevance = (score as u32).max(1); // Base relevance from sentence match
                     
                     // Check words before and after in the context
                     let window_start = i.saturating_sub(3);
@@ -511,17 +613,17 @@ impl LanguageModel {
                         if j != i {
                             let nearby_word = self.extract_word(&context.tokens[j]).to_lowercase();
                             if context_words.contains(&nearby_word) {
-                                relevance += 3; // Higher score if near query words (stronger signal)
+                                relevance += 5; // Higher score if near query words (stronger signal)
                             }
                         }
                     }
                     
                     // Bonus: if this word appears early in a highly-relevant context, boost it
                     if score >= 2.0 && i < 5 {
-                        relevance += 2;
+                        relevance += 3;
                     }
                     
-                    // Add candidate with relevance score
+                    // Add candidate with relevance score (accumulate with sentence matching scores)
                     if let Some(existing) = candidates.iter_mut().find(|(w, _)| w == token) {
                         existing.1 += relevance; // Accumulate scores
                     } else {
@@ -802,7 +904,8 @@ impl LanguageModel {
             };
             
             // Strategy 1: Use FULL TEXT SCAN - find contextual candidates from similar contexts
-            let contextual_candidates = self.find_contextual_candidates(&response_tokens, wildcard_pos, &response_tokens);
+            // Uses sentence matching: matches ALL words with ALL sentences, picks best matches
+            let contextual_candidates = self.find_contextual_candidates(wildcard_pos, &response_tokens);
             
             // Strategy 2: Try to find matching n-grams that suggest a phrase
             let ngram_candidates = self.find_matching_ngrams_with_context(&response_tokens, wildcard_pos);
