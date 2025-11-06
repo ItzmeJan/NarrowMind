@@ -909,13 +909,19 @@ impl LanguageModel {
             response_tokens.clone()
         };
         
-        let max_tokens = 30; // Limit to prevent overly long responses
+        let max_tokens = 15; // Reduced limit for shorter, more concise responses
         
         // Generate tokens one by one, similar to reference implementation
         loop {
             // Get next token from context
             if let Some(next_token) = self.generate_continuation(&context, false) {
                 let base_word = self.extract_word(&next_token);
+                
+                // Early stopping: if we've generated a reasonable response length, stop at sentence end
+                if response_tokens.len() >= 8 && self.is_sentence_ender(&next_token) {
+                    response_tokens.push(next_token);
+                    break;
+                }
                 
                 // Enhanced repetition detection: check for multiple patterns
                 let mut should_stop = false;
@@ -997,8 +1003,17 @@ impl LanguageModel {
                 response_tokens.push(next_token.clone());
                 
                 // Stop if token ends with sentence-ending punctuation
-                // Also check if we've generated a reasonable minimum length
-                if self.is_sentence_ender(&next_token) && response_tokens.len() >= 3 {
+                // Stop earlier for shorter responses
+                if self.is_sentence_ender(&next_token) {
+                    break;
+                }
+                
+                // Also stop if we've reached a reasonable length (shorter limit)
+                if response_tokens.len() >= 12 {
+                    // Try to end gracefully - add period if we haven't hit one yet
+                    if !response_tokens.iter().any(|t| self.is_sentence_ender(t)) {
+                        // Don't add period, just stop
+                    }
                     break;
                 }
                 
