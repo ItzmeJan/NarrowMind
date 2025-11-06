@@ -436,33 +436,44 @@ impl LanguageModel {
                 .map(|t| self.extract_word(t).to_lowercase())
                 .collect();
             
-            // Count how many query words appear in this sentence (with frequency weighting)
-            let mut match_count = 0;
-            let mut weighted_match_score = 0.0;
+            // Count unique query words that appear in this sentence
+            // PRIORITIZE: Different/unique tokens matter more than same word appearing multiple times
+            let mut unique_matches = std::collections::HashSet::new();
+            let mut total_occurrences = 0;
             let total_query_words = normalized_query.len();
             
             for query_word in &normalized_query {
-                // Count occurrences in sentence (frequency matters!)
+                // Count occurrences in sentence
                 let occurrences_in_sentence = sentence_words.iter()
                     .filter(|w| w == &query_word)
                     .count();
                 
                 if occurrences_in_sentence > 0 {
-                    match_count += 1;
-                    // Weight by frequency: more occurrences = higher score
-                    // Also weight by how often this query word appears in the query
-                    let query_freq = query_word_frequency.get(query_word).unwrap_or(&1);
-                    weighted_match_score += (occurrences_in_sentence as f64) * (*query_freq as f64);
+                    unique_matches.insert(query_word.clone());
+                    total_occurrences += occurrences_in_sentence;
                 }
             }
             
-            // Calculate match ratio (percentage of query words found)
+            let match_count = unique_matches.len();
+            
+            // Calculate match ratio (percentage of unique query words found)
             if total_query_words > 0 {
                 let match_ratio = match_count as f64 / total_query_words as f64;
                 
-                // Score = weighted match score + match count + bonus for high match ratio
-                // Frequency matters: words that appear more often in matching sentences rank higher
-                let score = weighted_match_score + (match_count as f64) + (match_ratio * 3.0);
+                // PRIORITIZE UNIQUE MATCHES: Different tokens weighted much higher
+                // Base score heavily favors unique matches (each unique match = 10 points)
+                let unique_match_score = (match_count as f64) * 10.0;
+                
+                // Frequency bonus is small (each additional occurrence = 0.5 points)
+                // This ensures sentences with more different words rank higher than
+                // sentences with the same word repeated many times
+                let frequency_bonus = (total_occurrences - match_count) as f64 * 0.5;
+                
+                // Match ratio bonus (higher ratio = better)
+                let ratio_bonus = match_ratio * 5.0;
+                
+                // Final score: unique matches are most important
+                let score = unique_match_score + frequency_bonus + ratio_bonus;
                 
                 // Also track exact match count for tie-breaking
                 context_scores.insert(ctx_idx, (score, match_count));
@@ -515,12 +526,13 @@ impl LanguageModel {
         }
         
         // Apply frequency boost: tokens that appear in more matching sentences get higher scores
-        // This makes frequently occurring words in relevant contexts rank higher
+        // BUT: Prioritize tokens from sentences with more unique matches over frequency
+        // Frequency multiplier is smaller to avoid over-weighting repeated words
         for (token, score) in token_scores.iter_mut() {
             let freq = token_frequency.get(token).unwrap_or(&0);
-            // Frequency multiplier: more sentences = exponentially higher score
-            // This ensures words that consistently appear in matching sentences rank highest
-            let freq_multiplier = 1.0 + (freq * 2) as f64;
+            // Reduced frequency multiplier: prioritize unique matches over frequency
+            // This ensures different tokens from prompt rank higher than same word repeated
+            let freq_multiplier = 1.0 + (freq * 0.5) as f64; // Reduced from 2.0 to 0.5
             *score = ((*score as f64) * freq_multiplier) as u32;
         }
         
