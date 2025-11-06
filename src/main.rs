@@ -483,17 +483,22 @@ impl LanguageModel {
     
     /// Get tokens from top matching sentences for generation
     /// This uses the best matching sentences as a source for tokens
+    /// IMPROVED: Frequency-based ranking - words that appear in more matching sentences rank higher
     fn get_tokens_from_matching_sentences(&self, query_words: &[String]) -> Vec<(String, u32)> {
         let mut token_scores: HashMap<String, u32> = HashMap::new();
+        let mut token_frequency: HashMap<String, u32> = HashMap::new(); // Count how many sentences contain each token
         
         // Find top matching sentences
         let top_sentences = self.find_similar_contexts(query_words);
         
-        // Extract tokens from top matching sentences with scores based on sentence match quality
+        // Extract tokens from top matching sentences with frequency-based scoring
         for (sentence_idx, match_score) in top_sentences {
             if let Some(context) = self.contexts.get(sentence_idx) {
-                // Higher match score = higher weight for tokens from this sentence
-                let weight = (match_score * 10.0) as u32;
+                // Higher match score = higher base weight for tokens from this sentence
+                let base_weight = (match_score * 5.0) as u32;
+                
+                // Track which tokens appear in this sentence
+                let mut sentence_tokens = std::collections::HashSet::new();
                 
                 for token in &context.tokens {
                     let word = self.extract_word(token).to_lowercase();
@@ -503,10 +508,24 @@ impl LanguageModel {
                         continue;
                     }
                     
-                    // Add token with weight based on sentence match quality
-                    *token_scores.entry(token.clone()).or_insert(0) += weight;
+                    // Count frequency: how many matching sentences contain this token
+                    *token_frequency.entry(token.clone()).or_insert(0) += 1;
+                    sentence_tokens.insert(token.clone());
+                    
+                    // Base weight from sentence match quality
+                    *token_scores.entry(token.clone()).or_insert(0) += base_weight;
                 }
             }
+        }
+        
+        // Apply frequency boost: tokens that appear in more matching sentences get higher scores
+        // This makes frequently occurring words in relevant contexts rank higher
+        for (token, score) in token_scores.iter_mut() {
+            let freq = token_frequency.get(token).unwrap_or(&0);
+            // Frequency multiplier: more sentences = exponentially higher score
+            // This ensures words that consistently appear in matching sentences rank highest
+            let freq_multiplier = 1.0 + (freq * 2) as f64;
+            *score = ((*score as f64) * freq_multiplier) as u32;
         }
         
         // Convert to vector
