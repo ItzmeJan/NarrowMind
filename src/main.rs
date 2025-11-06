@@ -414,7 +414,7 @@ impl LanguageModel {
 
     /// Find similar contexts in training data by matching ALL words with ALL sentences
     /// Returns contexts sorted by match score (sentences that match the most words)
-    /// IMPROVED: Also counts word frequency - words that match more often get higher scores
+    /// PRIORITIZES: Different/unique tokens from prompt over same word appearing multiple times
     fn find_similar_contexts(&self, query_words: &[String]) -> Vec<(usize, f64)> {
         let mut context_scores: HashMap<usize, (f64, usize)> = HashMap::new();
         
@@ -524,10 +524,10 @@ impl LanguageModel {
         // BUT: Prioritize tokens from sentences with more unique matches over frequency
         // Frequency multiplier is smaller to avoid over-weighting repeated words
         for (token, score) in token_scores.iter_mut() {
-            let freq = token_frequency.get(token).unwrap_or(&0);
+            let freq = *token_frequency.get(token).unwrap_or(&0);
             // Reduced frequency multiplier: prioritize unique matches over frequency
             // This ensures different tokens from prompt rank higher than same word repeated
-            let freq_multiplier = 1.0 + (*freq as f64 * 0.5); // Reduced from 2.0 to 0.5
+            let freq_multiplier = 1.0 + (freq as f64 * 0.5); // Reduced from 2.0 to 0.5
             *score = ((*score as f64) * freq_multiplier) as u32;
         }
         
