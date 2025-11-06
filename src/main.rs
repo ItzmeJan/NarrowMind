@@ -412,137 +412,90 @@ impl LanguageModel {
     }
 
 
-    /// Find similar contexts in training data by matching ALL words with ALL sentences
-    /// Returns contexts sorted by match score (sentences that match the most words)
-    /// PRIORITIZES: Different/unique tokens from prompt over same word appearing multiple times
+    /// Generate power set (all possible subsets) of words
+    /// Returns all non-empty subsets of the input words
+    fn generate_power_set(words: &[String]) -> Vec<Vec<String>> {
+        let n = words.len();
+        let mut power_set = Vec::new();
+        
+        // Generate all 2^n - 1 non-empty subsets (exclude empty set)
+        for i in 1..(1 << n) {
+            let mut subset = Vec::new();
+            for j in 0..n {
+                if (i >> j) & 1 == 1 {
+                    subset.push(words[j].clone());
+                }
+            }
+            power_set.push(subset);
+        }
+        
+        power_set
+    }
+    
+    /// Check if a subset of words appears in a sentence (words appear together)
+    fn subset_in_sentence(subset: &[String], sentence_words: &[String]) -> bool {
+        // Convert sentence to set for faster lookup
+        let sentence_set: std::collections::HashSet<&String> = sentence_words.iter().collect();
+        
+        // All words in subset must be in sentence
+        subset.iter().all(|word| sentence_set.contains(word))
+    }
+    
+    /// Find similar contexts using power set matching
+    /// Generates all subsets of prompt words and matches them to sentences
+    /// Sentences matching more subsets get higher weight - simpler and more effective!
     fn find_similar_contexts(&self, query_words: &[String]) -> Vec<(usize, f64)> {
-        let mut context_scores: HashMap<usize, (f64, usize)> = HashMap::new();
+        let mut context_scores: HashMap<usize, f64> = HashMap::new();
         
         // Normalize query words (lowercase, extract base word)
         let normalized_query: Vec<String> = query_words.iter()
             .map(|w| self.extract_word(w).to_lowercase())
             .collect();
         
-        // Score each sentence by matching ALL words
-        // PRIORITIZE: Different/unique tokens from prompt over same word repeated
+        if normalized_query.is_empty() {
+            return Vec::new();
+        }
+        
+        // Generate power set: all possible subsets of query words
+        let power_set = self.generate_power_set(&normalized_query);
+        
+        // Score each sentence by counting how many subsets it matches
         for (ctx_idx, context) in self.contexts.iter().enumerate() {
             // Extract all words from this sentence (normalized)
             let sentence_words: Vec<String> = context.tokens.iter()
                 .map(|t| self.extract_word(t).to_lowercase())
                 .collect();
             
-            // Count unique query words that appear in this sentence
-            // PRIORITIZE: Different/unique tokens matter more than same word appearing multiple times
-            let mut unique_matches = std::collections::HashSet::new();
-            let mut total_occurrences = 0;
-            let total_query_words = normalized_query.len();
+            // Count how many subsets from power set appear in this sentence
+            let mut matching_subsets = 0;
+            let mut total_subset_weight = 0.0;
             
-            for query_word in &normalized_query {
-                // Count occurrences in sentence
-                let occurrences_in_sentence = sentence_words.iter()
-                    .filter(|w| w == &query_word)
-                    .count();
-                
-                if occurrences_in_sentence > 0 {
-                    unique_matches.insert(query_word.clone());
-                    total_occurrences += occurrences_in_sentence;
+            for subset in &power_set {
+                if Self::subset_in_sentence(subset, &sentence_words) {
+                    matching_subsets += 1;
+                    // Larger subsets get more weight (exponential)
+                    // Subset of size 1 = 1 point, size 2 = 4 points, size 3 = 9 points, etc.
+                    let subset_size = subset.len() as f64;
+                    total_subset_weight += subset_size * subset_size;
                 }
             }
             
-            let match_count = unique_matches.len();
+            // Score = number of matching subsets + weighted sum of subset sizes
+            // This naturally rewards sentences with more word combinations
+            let score = (matching_subsets as f64) * 2.0 + total_subset_weight;
             
-            // SEQUENCE DETECTION: Find sequences of query words appearing in order
-            // This gives extra points for tokens appearing in sequence from the prompt
-            let mut sequence_bonus = 0.0;
-            let mut max_sequence_length = 0;
-            
-            // Find the longest sequence of query words appearing in order (allowing gaps)
-            for start_idx in 0..sentence_words.len() {
-                let mut sequence_length = 0;
-                let mut query_idx = 0;
-                
-                // Try to match a sequence starting from this position
-                // Allow skipping non-matching words between matches
-                for i in start_idx..sentence_words.len() {
-                    if query_idx < normalized_query.len() && sentence_words[i] == normalized_query[query_idx] {
-                        sequence_length += 1;
-                        query_idx += 1;
-                    }
-                    // If we've matched all query words, stop
-                    if query_idx >= normalized_query.len() {
-                        break;
-                    }
-                }
-                
-                if sequence_length > max_sequence_length {
-                    max_sequence_length = sequence_length;
-                }
-            }
-            
-            // Bonus for sequences: longer sequences get exponentially more points
-            // Sequence of 2 words = 5 points, 3 words = 15 points, 4 words = 30 points, etc.
-            if max_sequence_length >= 2 {
-                sequence_bonus = (max_sequence_length as f64) * (max_sequence_length as f64) * 1.25;
-            }
-            
-            // Also check for groups of sequential words (any number, not necessarily in exact order)
-            // Find groups where multiple query words appear close together
-            let mut group_bonus = 0.0;
-            let window_size = 5; // Look for groups within 5 words
-            
-            for start_idx in 0..sentence_words.len().saturating_sub(window_size) {
-                let window = &sentence_words[start_idx..(start_idx + window_size).min(sentence_words.len())];
-                let mut words_in_window = 0;
-                
-                for query_word in &normalized_query {
-                    if window.contains(query_word) {
-                        words_in_window += 1;
-                    }
-                }
-                
-                // Bonus for groups: more words in a small window = higher bonus
-                if words_in_window >= 2 {
-                    // Exponential bonus: 2 words = 3 points, 3 words = 9 points, 4 words = 18 points
-                    group_bonus += (words_in_window as f64) * (words_in_window as f64) * 0.75;
-                }
-            }
-            
-            // Calculate match ratio (percentage of unique query words found)
-            if total_query_words > 0 {
-                let match_ratio = match_count as f64 / total_query_words as f64;
-                
-                // PRIORITIZE UNIQUE MATCHES: Different tokens weighted much higher
-                // Base score heavily favors unique matches (each unique match = 10 points)
-                let unique_match_score = (match_count as f64) * 10.0;
-                
-                // Frequency bonus is small (each additional occurrence = 0.5 points)
-                // This ensures sentences with more different words rank higher than
-                // sentences with the same word repeated many times
-                let frequency_bonus = (total_occurrences - match_count) as f64 * 0.5;
-                
-                // Match ratio bonus (higher ratio = better)
-                let ratio_bonus = match_ratio * 5.0;
-                
-                // SEQUENCE BONUS: Extra points for tokens appearing in sequence
-                // This heavily rewards sentences where prompt words appear in order
-                
-                // Final score: unique matches + sequence bonus + group bonus
-                let score = unique_match_score + frequency_bonus + ratio_bonus + sequence_bonus + group_bonus;
-                
-                // Also track exact match count for tie-breaking
-                context_scores.insert(ctx_idx, (score, match_count));
+            if score > 0.0 {
+                context_scores.insert(ctx_idx, score);
             }
         }
         
-        // Convert to sorted vector (by score, then by match count)
-        let mut scored_contexts: Vec<(usize, f64)> = context_scores.into_iter()
-            .map(|(idx, (score, _))| (idx, score))
-            .collect();
+        // Convert to sorted vector (by score, descending)
+        let mut scored_contexts: Vec<(usize, f64)> = context_scores.into_iter().collect();
         scored_contexts.sort_by(|a, b| {
             b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
         });
         
-        // Return top matching sentences (more than before for better coverage)
+        // Return top matching sentences
         scored_contexts.into_iter().take(30).collect()
     }
     
