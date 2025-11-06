@@ -456,34 +456,33 @@ impl LanguageModel {
             let mut sequence_bonus = 0.0;
             let mut max_sequence_length = 0;
             
-            // Find all sequences of consecutive query words in the sentence
+            // Find the longest sequence of query words appearing in order (allowing gaps)
             for start_idx in 0..sentence_words.len() {
                 let mut sequence_length = 0;
                 let mut query_idx = 0;
                 
                 // Try to match a sequence starting from this position
+                // Allow skipping non-matching words between matches
                 for i in start_idx..sentence_words.len() {
                     if query_idx < normalized_query.len() && sentence_words[i] == normalized_query[query_idx] {
                         sequence_length += 1;
                         query_idx += 1;
-                    } else {
-                        // Check if we can continue with next query word (skip non-matching words)
-                        if query_idx < normalized_query.len() && sentence_words[i] == normalized_query[query_idx] {
-                            sequence_length += 1;
-                            query_idx += 1;
-                        }
+                    }
+                    // If we've matched all query words, stop
+                    if query_idx >= normalized_query.len() {
+                        break;
                     }
                 }
                 
                 if sequence_length > max_sequence_length {
                     max_sequence_length = sequence_length;
                 }
-                
-                // Bonus for sequences: longer sequences get exponentially more points
-                // Sequence of 2 words = 5 points, 3 words = 15 points, 4 words = 30 points, etc.
-                if sequence_length >= 2 {
-                    sequence_bonus += (sequence_length as f64) * (sequence_length as f64) * 1.25;
-                }
+            }
+            
+            // Bonus for sequences: longer sequences get exponentially more points
+            // Sequence of 2 words = 5 points, 3 words = 15 points, 4 words = 30 points, etc.
+            if max_sequence_length >= 2 {
+                sequence_bonus = (max_sequence_length as f64) * (max_sequence_length as f64) * 1.25;
             }
             
             // Also check for groups of sequential words (any number, not necessarily in exact order)
