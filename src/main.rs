@@ -527,7 +527,7 @@ impl LanguageModel {
             let freq = token_frequency.get(token).unwrap_or(&0);
             // Reduced frequency multiplier: prioritize unique matches over frequency
             // This ensures different tokens from prompt rank higher than same word repeated
-            let freq_multiplier = 1.0 + (freq * 0.5) as f64; // Reduced from 2.0 to 0.5
+            let freq_multiplier = 1.0 + (*freq as f64 * 0.5); // Reduced from 2.0 to 0.5
             *score = ((*score as f64) * freq_multiplier) as u32;
         }
         
