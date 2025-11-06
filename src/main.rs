@@ -414,6 +414,7 @@ impl LanguageModel {
 
     /// Find similar contexts in training data by matching ALL words with ALL sentences
     /// Returns contexts sorted by match score (sentences that match the most words)
+    /// IMPROVED: Also counts word frequency - words that match more often get higher scores
     fn find_similar_contexts(&self, query_words: &[String]) -> Vec<(usize, f64)> {
         let mut context_scores: HashMap<usize, (f64, usize)> = HashMap::new();
         
@@ -422,6 +423,12 @@ impl LanguageModel {
             .map(|w| self.extract_word(w).to_lowercase())
             .collect();
         
+        // Count frequency of each query word across all sentences
+        let mut query_word_frequency: HashMap<String, u32> = HashMap::new();
+        for query_word in &normalized_query {
+            *query_word_frequency.entry(query_word.clone()).or_insert(0) += 1;
+        }
+        
         // Score each sentence by matching ALL words
         for (ctx_idx, context) in self.contexts.iter().enumerate() {
             // Extract all words from this sentence (normalized)
@@ -429,13 +436,23 @@ impl LanguageModel {
                 .map(|t| self.extract_word(t).to_lowercase())
                 .collect();
             
-            // Count how many query words appear in this sentence
+            // Count how many query words appear in this sentence (with frequency weighting)
             let mut match_count = 0;
-            let mut total_query_words = normalized_query.len();
+            let mut weighted_match_score = 0.0;
+            let total_query_words = normalized_query.len();
             
             for query_word in &normalized_query {
-                if sentence_words.contains(query_word) {
+                // Count occurrences in sentence (frequency matters!)
+                let occurrences_in_sentence = sentence_words.iter()
+                    .filter(|w| w == &query_word)
+                    .count();
+                
+                if occurrences_in_sentence > 0 {
                     match_count += 1;
+                    // Weight by frequency: more occurrences = higher score
+                    // Also weight by how often this query word appears in the query
+                    let query_freq = query_word_frequency.get(query_word).unwrap_or(&1);
+                    weighted_match_score += (occurrences_in_sentence as f64) * (*query_freq as f64);
                 }
             }
             
@@ -443,9 +460,9 @@ impl LanguageModel {
             if total_query_words > 0 {
                 let match_ratio = match_count as f64 / total_query_words as f64;
                 
-                // Score = match_count + bonus for high match ratio
-                // This favors sentences that match more words AND higher percentage
-                let score = match_count as f64 + (match_ratio * 2.0);
+                // Score = weighted match score + match count + bonus for high match ratio
+                // Frequency matters: words that appear more often in matching sentences rank higher
+                let score = weighted_match_score + (match_count as f64) + (match_ratio * 3.0);
                 
                 // Also track exact match count for tie-breaking
                 context_scores.insert(ctx_idx, (score, match_count));
@@ -461,7 +478,7 @@ impl LanguageModel {
         });
         
         // Return top matching sentences (more than before for better coverage)
-        scored_contexts.into_iter().take(20).collect()
+        scored_contexts.into_iter().take(30).collect()
     }
     
     /// Get tokens from top matching sentences for generation
