@@ -15,9 +15,12 @@ struct ContextEntry {
 }
 
 struct LanguageModel {
-    n: usize,
-    ngram_counts: NGramCount,
-    ngram_contexts: NGramContext,
+    n: usize, // Primary n-gram size (for backward compatibility)
+    ngram_sizes: Vec<usize>, // All n-gram sizes to train (e.g., [2, 3, 4])
+    ngram_weights: HashMap<usize, f64>, // Weights for each n-gram size (must sum to ~1.0)
+    ngram_counts: NGramCount, // Combined counts (for backward compatibility)
+    ngram_contexts: NGramContext, // Primary n-gram contexts (for backward compatibility)
+    multi_ngram_contexts: HashMap<usize, NGramContext>, // Separate contexts for each n-gram size
     vocabulary: Vec<String>,
     unigram_counts: HashMap<String, u32>, // For smoothing and backoff
     total_unigrams: u32, // Total word count for probability calculations
@@ -31,15 +34,78 @@ struct LanguageModel {
 
 impl LanguageModel {
     fn new(n: usize) -> Self {
+        // Default: train bigrams (2) and trigrams (3)
+        // Weights: trigram=0.5, bigram=0.3, 4-gram=0.2 (if used)
+        let ngram_sizes = vec![2, 3]; // Bigrams and trigrams
+        let mut ngram_weights = HashMap::new();
+        ngram_weights.insert(3, 0.5); // Trigram weight
+        ngram_weights.insert(2, 0.3); // Bigram weight
+        // Normalize weights
+        let total_weight: f64 = ngram_weights.values().sum();
+        for weight in ngram_weights.values_mut() {
+            *weight /= total_weight;
+        }
+        
+        let mut multi_ngram_contexts = HashMap::new();
+        for &size in &ngram_sizes {
+            multi_ngram_contexts.insert(size, HashMap::new());
+        }
+        
         Self {
             n,
+            ngram_sizes,
+            ngram_weights,
             ngram_counts: HashMap::new(),
             ngram_contexts: HashMap::new(),
+            multi_ngram_contexts,
             vocabulary: Vec::new(),
             unigram_counts: HashMap::new(),
             total_unigrams: 0,
             temperature: 1.0, // Default: normal randomness
             top_k: 40, // Default: consider top 40 candidates
+            contexts: Vec::new(),
+            word_to_contexts: HashMap::new(),
+            context_windows: HashMap::new(),
+        }
+    }
+    
+    /// Create model with custom n-gram sizes and weights
+    fn new_with_ngrams(ngram_sizes: Vec<usize>, weights: Vec<f64>) -> Self {
+        if ngram_sizes.len() != weights.len() {
+            panic!("ngram_sizes and weights must have the same length");
+        }
+        
+        let primary_n = *ngram_sizes.iter().max().unwrap_or(&3);
+        let mut ngram_weights = HashMap::new();
+        for (size, weight) in ngram_sizes.iter().zip(weights.iter()) {
+            ngram_weights.insert(*size, *weight);
+        }
+        
+        // Normalize weights to sum to 1.0
+        let total_weight: f64 = ngram_weights.values().sum();
+        if total_weight > 0.0 {
+            for weight in ngram_weights.values_mut() {
+                *weight /= total_weight;
+            }
+        }
+        
+        let mut multi_ngram_contexts = HashMap::new();
+        for &size in &ngram_sizes {
+            multi_ngram_contexts.insert(size, HashMap::new());
+        }
+        
+        Self {
+            n: primary_n,
+            ngram_sizes,
+            ngram_weights,
+            ngram_counts: HashMap::new(),
+            ngram_contexts: HashMap::new(),
+            multi_ngram_contexts,
+            vocabulary: Vec::new(),
+            unigram_counts: HashMap::new(),
+            total_unigrams: 0,
+            temperature: 1.0,
+            top_k: 40,
             contexts: Vec::new(),
             word_to_contexts: HashMap::new(),
             context_windows: HashMap::new(),
@@ -111,32 +177,45 @@ impl LanguageModel {
             .cloned()
             .collect();
         
-        if tokens.len() < self.n {
-            return;
-        }
+        // Train n-grams for all sizes
+        for &ngram_size in &self.ngram_sizes {
+            if tokens.len() < ngram_size {
+                continue;
+            }
 
-        for i in 0..=tokens.len().saturating_sub(self.n) {
-            let ngram: NGram = tokens[i..i + self.n].to_vec();
-            
-            // Count n-grams
-            *self.ngram_counts.entry(ngram.clone()).or_insert(0) += 1;
+            // Get the context map for this n-gram size
+            let ngram_contexts = self.multi_ngram_contexts.get_mut(&ngram_size).unwrap();
 
-            // Build context for generation (context is n-1 tokens, next token is the continuation)
-            if i + self.n < tokens.len() {
-                let context: Vec<String> = ngram[..self.n - 1].to_vec();
-                let next_token = tokens[i + self.n].clone();
+            for i in 0..=tokens.len().saturating_sub(ngram_size) {
+                let ngram: NGram = tokens[i..i + ngram_size].to_vec();
                 
-                let continuations = self.ngram_contexts
-                    .entry(context)
-                    .or_insert_with(Vec::new);
-                
-                // Check if this continuation already exists
-                if let Some(existing) = continuations.iter_mut().find(|(token, _)| token == &next_token) {
-                    existing.1 += 1;
-                } else {
-                    continuations.push((next_token, 1));
+                // Count n-grams (store in primary ngram_counts for backward compatibility)
+                if ngram_size == self.n {
+                    *self.ngram_counts.entry(ngram.clone()).or_insert(0) += 1;
+                }
+
+                // Build context for generation (context is n-1 tokens, next token is the continuation)
+                if i + ngram_size < tokens.len() {
+                    let context: Vec<String> = ngram[..ngram_size - 1].to_vec();
+                    let next_token = tokens[i + ngram_size].clone();
+                    
+                    let continuations = ngram_contexts
+                        .entry(context)
+                        .or_insert_with(Vec::new);
+                    
+                    // Check if this continuation already exists
+                    if let Some(existing) = continuations.iter_mut().find(|(token, _)| token == &next_token) {
+                        existing.1 += 1;
+                    } else {
+                        continuations.push((next_token, 1));
+                    }
                 }
             }
+        }
+        
+        // Also maintain primary n-gram contexts for backward compatibility
+        if let Some(primary_contexts) = self.multi_ngram_contexts.get(&self.n) {
+            self.ngram_contexts = primary_contexts.clone();
         }
 
         // Build vocabulary and unigram counts (only non-question words)
