@@ -241,6 +241,137 @@ impl LanguageModel {
             *self.unigram_counts.entry(token.clone()).or_insert(0) += 1;
             self.total_unigrams += 1;
         }
+        
+        // Compute TF-IDF vectors for sentence selection (#2 preference)
+        self.compute_tfidf();
+    }
+    
+    /// Compute TF-IDF vectors for all sentences
+    /// Used for vector-based sentence selection as fallback to power set matching
+    fn compute_tfidf(&mut self) {
+        self.total_sentences = self.contexts.len();
+        if self.total_sentences == 0 {
+            return;
+        }
+        
+        // Step 1: Count document frequency (DF) - how many sentences contain each word
+        let mut document_frequency: HashMap<String, usize> = HashMap::new();
+        
+        for context in &self.contexts {
+            let mut sentence_words: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for token in &context.tokens {
+                let word = self.extract_word(token).to_lowercase();
+                if !self.is_question_word(&word) {
+                    sentence_words.insert(word);
+                }
+            }
+            for word in sentence_words {
+                *document_frequency.entry(word).or_insert(0) += 1;
+            }
+        }
+        
+        // Step 2: Compute IDF (Inverse Document Frequency)
+        // IDF = log(total_sentences / (1 + document_frequency))
+        for (word, df) in &document_frequency {
+            let idf = ((self.total_sentences as f64) / (1.0 + *df as f64)).ln();
+            self.idf_scores.insert(word.clone(), idf);
+        }
+        
+        // Step 3: Compute TF-IDF vectors for each sentence
+        self.tfidf_vectors.clear();
+        for context in &self.contexts {
+            let mut tfidf_vector: HashMap<String, f64> = HashMap::new();
+            
+            // Count term frequency (TF) in this sentence
+            let mut term_frequency: HashMap<String, usize> = HashMap::new();
+            let mut total_words = 0;
+            
+            for token in &context.tokens {
+                let word = self.extract_word(token).to_lowercase();
+                if !self.is_question_word(&word) {
+                    *term_frequency.entry(word.clone()).or_insert(0) += 1;
+                    total_words += 1;
+                }
+            }
+            
+            // Compute TF-IDF = TF * IDF
+            // TF = count(word) / total_words_in_sentence
+            for (word, count) in term_frequency {
+                let tf = count as f64 / total_words as f64;
+                let idf = *self.idf_scores.get(&word).unwrap_or(&0.0);
+                tfidf_vector.insert(word, tf * idf);
+            }
+            
+            self.tfidf_vectors.push(tfidf_vector);
+        }
+    }
+    
+    /// Find similar contexts using TF-IDF cosine similarity (#2 preference)
+    /// Falls back to this when power set matching (#1) doesn't find good matches
+    fn find_similar_contexts_tfidf(&self, query_words: &[String]) -> Vec<(usize, f64)> {
+        if self.tfidf_vectors.is_empty() || query_words.is_empty() {
+            return Vec::new();
+        }
+        
+        // Build query TF-IDF vector
+        let mut query_vector: HashMap<String, f64> = HashMap::new();
+        let mut query_tf: HashMap<String, usize> = HashMap::new();
+        let query_word_count = query_words.len();
+        
+        for word in query_words {
+            let normalized_word = self.extract_word(word).to_lowercase();
+            if !self.is_question_word(&normalized_word) {
+                *query_tf.entry(normalized_word).or_insert(0) += 1;
+            }
+        }
+        
+        // Compute TF-IDF for query
+        for (word, count) in query_tf {
+            let tf = count as f64 / query_word_count as f64;
+            let idf = *self.idf_scores.get(&word).unwrap_or(&0.0);
+            query_vector.insert(word, tf * idf);
+        }
+        
+        // Compute cosine similarity with each sentence vector
+        let mut similarities: Vec<(usize, f64)> = Vec::new();
+        
+        for (idx, sentence_vector) in self.tfidf_vectors.iter().enumerate() {
+            let similarity = self.cosine_similarity(&query_vector, sentence_vector);
+            if similarity > 0.0 {
+                similarities.push((idx, similarity));
+            }
+        }
+        
+        // Sort by similarity (descending)
+        similarities.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        
+        // Return top matches
+        similarities.into_iter().take(30).collect()
+    }
+    
+    /// Compute cosine similarity between two TF-IDF vectors
+    fn cosine_similarity(&self, vec1: &HashMap<String, f64>, vec2: &HashMap<String, f64>) -> f64 {
+        let mut dot_product = 0.0;
+        let mut norm1 = 0.0;
+        let mut norm2 = 0.0;
+        
+        // Compute dot product and norms
+        let all_words: std::collections::HashSet<&String> = vec1.keys().chain(vec2.keys()).collect();
+        
+        for word in all_words {
+            let val1 = vec1.get(word).copied().unwrap_or(0.0);
+            let val2 = vec2.get(word).copied().unwrap_or(0.0);
+            
+            dot_product += val1 * val2;
+            norm1 += val1 * val1;
+            norm2 += val2 * val2;
+        }
+        
+        // Cosine similarity = dot_product / (sqrt(norm1) * sqrt(norm2))
+        let denominator = (norm1.sqrt() * norm2.sqrt()).max(1e-10); // Avoid division by zero
+        dot_product / denominator
     }
 
     fn tokenize(&self, text: &str) -> Vec<String> {
