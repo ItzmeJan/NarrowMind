@@ -1324,31 +1324,50 @@ impl LanguageModel {
         result
     }
 
-    /// Direct pattern matching: Replace wildcards with * and search training text
+    /// Direct pattern matching: Replace wildcards with * and search raw training text
+    /// Uses simple linear search on sentences split by .!?
     /// Returns map of wildcard positions to answer words if pattern found, None otherwise
-    fn try_direct_pattern_match(&self, query_tokens: &[String], wildcard_positions: &[usize]) -> Option<HashMap<usize, String>> {
+    fn try_direct_pattern_match(&self, query: &str, wildcard_positions: &[usize]) -> Option<HashMap<usize, String>> {
         if wildcard_positions.is_empty() {
             return None;
         }
         
-        // Build pattern: replace wildcards with * (normalized words)
-        let query_words_normalized: Vec<String> = query_tokens.iter()
-            .map(|t| self.extract_word(t).to_lowercase())
+        // Split query into words (simple whitespace split, lowercase)
+        let query_words: Vec<&str> = query.split_whitespace()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\''))
+            .filter(|w| !w.is_empty())
             .collect();
         
-        // Search through all stored contexts (sentences)
-        let mut best_matches: Vec<(HashMap<usize, String>, usize)> = Vec::new(); // (wildcard_pos -> answer_word map, match_score)
+        if query_words.is_empty() {
+            return None;
+        }
         
-        for context_entry in &self.contexts {
-            let sentence_words: Vec<String> = context_entry.tokens.iter()
-                .map(|t| self.extract_word(t).to_lowercase())
+        // Split training text into sentences by .!?
+        let sentences: Vec<&str> = self.raw_training_text
+            .split(|c: char| c == '.' || c == '!' || c == '?')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        
+        let mut best_matches: Vec<(HashMap<usize, String>, usize)> = Vec::new();
+        
+        // Search each sentence
+        for sentence in sentences {
+            // Split sentence into words (same way as query) - store as lowercase strings
+            let sentence_words: Vec<String> = sentence.split_whitespace()
+                .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\''))
+                .filter(|w| !w.is_empty())
+                .map(|w| w.to_lowercase())
                 .collect();
             
-            // Try to match the pattern in this sentence
-            // Pattern: query words with * in wildcard positions
+            if sentence_words.is_empty() {
+                continue;
+            }
+            
+            // Try to match query pattern at every position in the sentence
             for start_idx in 0..sentence_words.len() {
-                // Check if pattern matches starting at this position
-                if start_idx + query_words_normalized.len() > sentence_words.len() {
+                // Check if we have enough words to match the query
+                if start_idx + query_words.len() > sentence_words.len() {
                     continue;
                 }
                 
@@ -1356,16 +1375,29 @@ impl LanguageModel {
                 let mut match_score = 0;
                 let mut answer_map: HashMap<usize, String> = HashMap::new();
                 
-                for (i, query_word) in query_words_normalized.iter().enumerate() {
-                    let sentence_word = &sentence_words[start_idx + i];
+                // Match word by word
+                for (i, query_word) in query_words.iter().enumerate() {
+                    let query_word_lower = query_word.to_lowercase();
+                    let sentence_word = sentence_words[start_idx + i];
                     
                     if wildcard_positions.contains(&i) {
                         // This is a wildcard position - capture the answer word
-                        answer_map.insert(i, context_entry.tokens[start_idx + i].clone());
-                        match_score += 1; // Wildcard matches anything
+                        // Get the original word from the sentence (with original case)
+                        let original_sentence: Vec<&str> = sentence.split_whitespace()
+                            .map(|w| w.trim())
+                            .filter(|w| !w.is_empty())
+                            .collect();
+                        
+                        if start_idx + i < original_sentence.len() {
+                            // Extract just the word part (remove punctuation)
+                            let answer_word = original_sentence[start_idx + i]
+                                .trim_matches(|c: char| !c.is_alphanumeric() && c != '\'');
+                            answer_map.insert(i, answer_word.to_string());
+                            match_score += 1;
+                        }
                     } else {
-                        // This must match exactly
-                        if query_word == sentence_word {
+                        // This must match exactly (case-insensitive)
+                        if query_word_lower == sentence_word {
                             match_score += 2; // Exact match gets higher score
                         } else {
                             matches = false;
