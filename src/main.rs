@@ -1428,9 +1428,21 @@ impl LanguageModel {
             return "I don't understand.".to_string();
         }
 
-        // Find wildcard positions (question words) - ONLY in the user's query, not in training data
-        // Question words in training data are treated as regular tokens
-        let wildcard_positions: Vec<usize> = query_tokens.iter()
+        // Find wildcard positions (question words) - calculate from words for direct pattern matching
+        // Split query into words to find wildcard positions
+        let query_words: Vec<&str> = query.split_whitespace()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\''))
+            .filter(|w| !w.is_empty())
+            .collect();
+        
+        let wildcard_positions_words: Vec<usize> = query_words.iter()
+            .enumerate()
+            .filter(|(_, word)| self.is_question_word(word))
+            .map(|(i, _)| i)
+            .collect();
+        
+        // Also find wildcard positions in tokens (for later use)
+        let wildcard_positions_tokens: Vec<usize> = query_tokens.iter()
             .enumerate()
             .filter(|(_, token)| {
                 let word = self.extract_word(token);
@@ -1439,18 +1451,23 @@ impl LanguageModel {
             .map(|(i, _)| i)
             .collect();
 
-        // FIRST LAYER: Try direct pattern matching in training text
+        // FIRST LAYER: Try direct pattern matching in training text (using raw query and word positions)
         // Replace wildcards with * and search for exact matches
-        if !wildcard_positions.is_empty() {
-            if let Some(answer_map) = self.try_direct_pattern_match(&query_tokens, &wildcard_positions) {
+        if !wildcard_positions_words.is_empty() {
+            if let Some(answer_map) = self.try_direct_pattern_match(query, &wildcard_positions_words) {
                 // Found a direct match! Replace wildcards with answer words from the map
+                // Map word positions back to token positions for replacement
                 let mut response_tokens = query_tokens.clone();
                 
-                // Replace each wildcard position with its corresponding answer word
-                for &wildcard_pos in &wildcard_positions {
-                    if let Some(answer_word) = answer_map.get(&wildcard_pos) {
-                        if wildcard_pos < response_tokens.len() {
-                            response_tokens[wildcard_pos] = answer_word.clone();
+                // For each wildcard word position, find corresponding token and replace
+                for (word_idx, &wildcard_word_pos) in wildcard_positions_words.iter().enumerate() {
+                    if let Some(answer_word) = answer_map.get(&wildcard_word_pos) {
+                        // Find the token that corresponds to this word position
+                        if word_idx < wildcard_positions_tokens.len() {
+                            let token_pos = wildcard_positions_tokens[word_idx];
+                            if token_pos < response_tokens.len() {
+                                response_tokens[token_pos] = answer_word.clone();
+                            }
                         }
                     }
                 }
@@ -1463,6 +1480,9 @@ impl LanguageModel {
                 return self.format_tokens(&response_tokens);
             }
         }
+        
+        // Use token-based wildcard positions for the rest of the code
+        let wildcard_positions = wildcard_positions_tokens;
 
         // If no wildcards, try simple continuation
         if wildcard_positions.is_empty() {
