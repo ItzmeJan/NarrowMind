@@ -471,65 +471,74 @@ impl LanguageModel {
             }
         }
         
-        // Get n-gram candidates using backoff strategy with sentence-guided boosting
-        // Strategy 1: Full n-gram context
-        if context.len() >= self.n - 1 {
-            let context_key: Vec<String> = context[context.len().saturating_sub(self.n - 1)..].to_vec();
+        // MULTI-GRAM ENSEMBLE: Get candidates from all n-gram sizes with weighted combination
+        for &ngram_size in &self.ngram_sizes {
+            let ngram_weight = *self.ngram_weights.get(&ngram_size).unwrap_or(&0.0);
+            if ngram_weight == 0.0 {
+                continue;
+            }
             
-            if let Some(continuations) = self.ngram_contexts.get(&context_key) {
-                for (token, count) in continuations {
-                    let word = self.extract_word(token).to_lowercase();
-                    // Filter: only include if word appears in top matching sentences
-                    // Weight by sentence match score: words from higher-ranked sentences get more weight
-                    if sentence_words_set.contains(&word) {
-                        // Get the highest sentence score for this word
-                        let sentence_boost = word_to_sentence_scores.get(&word).copied().unwrap_or(0.0);
-                        
-                        // Boost n-gram count based on sentence ranking
-                        // Higher sentence score = more weight for this n-gram
-                        let boosted_count = (*count as f64) * (1.0 + sentence_boost * 0.1) as f64;
-                        
-                        *ngram_candidates.entry(token.clone()).or_insert(0) += boosted_count as u32;
+            // Get the n-gram contexts for this size
+            let ngram_contexts = match self.multi_ngram_contexts.get(&ngram_size) {
+                Some(ctx) => ctx,
+                None => continue,
+            };
+            
+            // Strategy 1: Full n-gram context
+            if context.len() >= ngram_size - 1 {
+                let context_key: Vec<String> = context[context.len().saturating_sub(ngram_size - 1)..].to_vec();
+                
+                if let Some(continuations) = ngram_contexts.get(&context_key) {
+                    for (token, count) in continuations {
+                        let word = self.extract_word(token).to_lowercase();
+                        // Filter: only include if word appears in top matching sentences
+                        if sentence_words_set.contains(&word) {
+                            // Get the highest sentence score for this word
+                            let sentence_boost = word_to_sentence_scores.get(&word).copied().unwrap_or(0.0);
+                            
+                            // Combine: n-gram weight * sentence boost * count
+                            let boosted_count = (*count as f64) * (1.0 + sentence_boost * 0.1) * ngram_weight;
+                            
+                            *ngram_candidates.entry(token.clone()).or_insert(0) += boosted_count as u32;
+                        }
                     }
                 }
             }
-        }
-        
-        // Strategy 2: Backoff to (n-2) context
-        if ngram_candidates.is_empty() && self.n > 2 && context.len() >= self.n - 2 {
-            let context_key: Vec<String> = context[context.len().saturating_sub(self.n - 2)..].to_vec();
             
-            for (ctx_key, continuations) in &self.ngram_contexts {
-                if ctx_key.len() >= context_key.len() {
-                    let ctx_suffix = &ctx_key[ctx_key.len() - context_key.len()..];
-                    if ctx_suffix == context_key.as_slice() {
-                        for (token, count) in continuations {
-                            let word = self.extract_word(token).to_lowercase();
-                            if sentence_words_set.contains(&word) {
-                                // Apply sentence score weighting
-                                let sentence_boost = word_to_sentence_scores.get(&word).copied().unwrap_or(0.0);
-                                let boosted_count = (*count as f64) * (1.0 + sentence_boost * 0.1) as f64;
-                                *ngram_candidates.entry(token.clone()).or_insert(0) += boosted_count as u32;
+            // Strategy 2: Backoff to (n-2) context
+            if ngram_candidates.is_empty() && ngram_size > 2 && context.len() >= ngram_size - 2 {
+                let context_key: Vec<String> = context[context.len().saturating_sub(ngram_size - 2)..].to_vec();
+                
+                for (ctx_key, continuations) in ngram_contexts {
+                    if ctx_key.len() >= context_key.len() {
+                        let ctx_suffix = &ctx_key[ctx_key.len() - context_key.len()..];
+                        if ctx_suffix == context_key.as_slice() {
+                            for (token, count) in continuations {
+                                let word = self.extract_word(token).to_lowercase();
+                                if sentence_words_set.contains(&word) {
+                                    let sentence_boost = word_to_sentence_scores.get(&word).copied().unwrap_or(0.0);
+                                    let boosted_count = (*count as f64) * (1.0 + sentence_boost * 0.1) * ngram_weight;
+                                    *ngram_candidates.entry(token.clone()).or_insert(0) += boosted_count as u32;
+                                }
                             }
                         }
                     }
                 }
             }
-        }
-        
-        // Strategy 3: Bigram backoff
-        if ngram_candidates.is_empty() && context.len() >= 1 {
-            let last_token = &context[context.len() - 1];
             
-            for (ctx_key, continuations) in &self.ngram_contexts {
-                if !ctx_key.is_empty() && ctx_key[ctx_key.len() - 1] == *last_token {
-                    for (token, count) in continuations {
-                        let word = self.extract_word(token).to_lowercase();
-                        if sentence_words_set.contains(&word) {
-                            // Apply sentence score weighting
-                            let sentence_boost = word_to_sentence_scores.get(&word).copied().unwrap_or(0.0);
-                            let boosted_count = (*count as f64) * (1.0 + sentence_boost * 0.1) as f64;
-                            *ngram_candidates.entry(token.clone()).or_insert(0) += boosted_count as u32;
+            // Strategy 3: Bigram backoff
+            if ngram_candidates.is_empty() && context.len() >= 1 {
+                let last_token = &context[context.len() - 1];
+                
+                for (ctx_key, continuations) in ngram_contexts {
+                    if !ctx_key.is_empty() && ctx_key[ctx_key.len() - 1] == *last_token {
+                        for (token, count) in continuations {
+                            let word = self.extract_word(token).to_lowercase();
+                            if sentence_words_set.contains(&word) {
+                                let sentence_boost = word_to_sentence_scores.get(&word).copied().unwrap_or(0.0);
+                                let boosted_count = (*count as f64) * (1.0 + sentence_boost * 0.1) * ngram_weight;
+                                *ngram_candidates.entry(token.clone()).or_insert(0) += boosted_count as u32;
+                            }
                         }
                     }
                 }
@@ -651,65 +660,68 @@ impl LanguageModel {
             return self.select_from_continuations(&combined_vec, stop_at_sentence_end);
         }
         
-        // Fallback: If no sentence-filtered n-grams, try unfiltered n-grams
-        // Strategy 1: Try full n-gram context (n-1 tokens)
-        if context.len() >= self.n - 1 {
-            let context_key: Vec<String> = context[context.len().saturating_sub(self.n - 1)..].to_vec();
+        // Fallback: If no sentence-filtered n-grams, try unfiltered multi-gram ensemble
+        // Use weighted combination from all n-gram sizes
+        let mut fallback_candidates: HashMap<String, f64> = HashMap::new();
+        
+        for &ngram_size in &self.ngram_sizes {
+            let ngram_weight = *self.ngram_weights.get(&ngram_size).unwrap_or(&0.0);
+            if ngram_weight == 0.0 {
+                continue;
+            }
             
-            if let Some(continuations) = self.ngram_contexts.get(&context_key) {
-                if !continuations.is_empty() {
-                    return self.select_from_continuations(continuations, stop_at_sentence_end);
+            let ngram_contexts = match self.multi_ngram_contexts.get(&ngram_size) {
+                Some(ctx) => ctx,
+                None => continue,
+            };
+            
+            // Strategy 1: Try full n-gram context (n-1 tokens)
+            if context.len() >= ngram_size - 1 {
+                let context_key: Vec<String> = context[context.len().saturating_sub(ngram_size - 1)..].to_vec();
+                
+                if let Some(continuations) = ngram_contexts.get(&context_key) {
+                    for (token, count) in continuations {
+                        *fallback_candidates.entry(token.clone()).or_insert(0.0) += (*count as f64) * ngram_weight;
+                    }
                 }
             }
-        }
-
-        // Strategy 2: Backoff to (n-2) context (if n > 2)
-        if self.n > 2 && context.len() >= self.n - 2 {
-            let context_key: Vec<String> = context[context.len().saturating_sub(self.n - 2)..].to_vec();
             
-            // Find all contexts that end with our context
-            let mut backoff_continuations: Vec<(String, u32)> = Vec::new();
-            for (ctx_key, continuations) in &self.ngram_contexts {
-                if ctx_key.len() >= context_key.len() {
-                    let ctx_suffix = &ctx_key[ctx_key.len() - context_key.len()..];
-                    if ctx_suffix == context_key.as_slice() {
-                        for (token, count) in continuations {
-                            if let Some(existing) = backoff_continuations.iter_mut().find(|(t, _)| t == token) {
-                                existing.1 += count;
-                            } else {
-                                backoff_continuations.push((token.clone(), *count));
+            // Strategy 2: Backoff to (n-2) context (if n > 2)
+            if fallback_candidates.is_empty() && ngram_size > 2 && context.len() >= ngram_size - 2 {
+                let context_key: Vec<String> = context[context.len().saturating_sub(ngram_size - 2)..].to_vec();
+                
+                for (ctx_key, continuations) in ngram_contexts {
+                    if ctx_key.len() >= context_key.len() {
+                        let ctx_suffix = &ctx_key[ctx_key.len() - context_key.len()..];
+                        if ctx_suffix == context_key.as_slice() {
+                            for (token, count) in continuations {
+                                *fallback_candidates.entry(token.clone()).or_insert(0.0) += (*count as f64) * ngram_weight;
                             }
                         }
                     }
                 }
             }
             
-            if !backoff_continuations.is_empty() {
-                return self.select_from_continuations(&backoff_continuations, stop_at_sentence_end);
-            }
-        }
-
-        // Strategy 3: Backoff to bigram (last token only)
-        if context.len() >= 1 {
-            let last_token = &context[context.len() - 1];
-            
-            // Collect all continuations where the context ends with our last token
-            let mut bigram_continuations: Vec<(String, u32)> = Vec::new();
-            for (ctx_key, continuations) in &self.ngram_contexts {
-                if !ctx_key.is_empty() && ctx_key[ctx_key.len() - 1] == *last_token {
-                    for (token, count) in continuations {
-                        if let Some(existing) = bigram_continuations.iter_mut().find(|(t, _)| t == token) {
-                            existing.1 += count;
-                        } else {
-                            bigram_continuations.push((token.clone(), *count));
+            // Strategy 3: Backoff to bigram (last token only)
+            if fallback_candidates.is_empty() && context.len() >= 1 {
+                let last_token = &context[context.len() - 1];
+                
+                for (ctx_key, continuations) in ngram_contexts {
+                    if !ctx_key.is_empty() && ctx_key[ctx_key.len() - 1] == *last_token {
+                        for (token, count) in continuations {
+                            *fallback_candidates.entry(token.clone()).or_insert(0.0) += (*count as f64) * ngram_weight;
                         }
                     }
                 }
             }
-            
-            if !bigram_continuations.is_empty() {
-                return self.select_from_continuations(&bigram_continuations, stop_at_sentence_end);
-            }
+        }
+        
+        if !fallback_candidates.is_empty() {
+            let fallback_vec: Vec<(String, u32)> = fallback_candidates
+                .into_iter()
+                .map(|(token, score)| (token, score as u32))
+                .collect();
+            return self.select_from_continuations(&fallback_vec, stop_at_sentence_end);
         }
 
         // Strategy 4: Final backoff to unigram (most frequent words overall)
@@ -1565,14 +1577,21 @@ fn main() {
         return;
     }
 
-    // Initialize model with trigrams (n=3)
-    let n = 3;
-    println!("Training model with {}-grams...", n);
+    // Initialize model with multi-gram ensemble (bigrams + trigrams)
+    // Default weights: trigram=0.625, bigram=0.375 (normalized from 0.5 and 0.3)
+    let n = 3; // Primary n-gram size (for backward compatibility)
+    println!("Training multi-gram ensemble model...");
     
     let mut model = LanguageModel::new(n);
+    println!("  - N-gram sizes: {:?}", model.ngram_sizes);
+    println!("  - Weights: bigram={:.2}, trigram={:.2}", 
+             model.ngram_weights.get(&2).unwrap_or(&0.0),
+             model.ngram_weights.get(&3).unwrap_or(&0.0));
+    
     model.train(&training_data);
     
-    println!("Training complete! Vocabulary size: {}\n", model.vocabulary.len());
+    println!("Training complete! Vocabulary size: {}", model.vocabulary.len());
+    println!("  - Multi-gram contexts trained for sizes: {:?}\n", model.ngram_sizes);
     println!("Enter questions (use question words like who, what, where, when, why, how as wildcards)");
     println!("Type 'quit' or 'exit' to stop.\n");
 
