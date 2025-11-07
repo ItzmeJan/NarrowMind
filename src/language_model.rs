@@ -29,6 +29,10 @@ pub struct LanguageModel {
     word_to_contexts: HashMap<String, Vec<usize>>, // Maps words to context indices where they appear
     context_windows: HashMap<String, Vec<(Vec<String>, Vec<String>)>>, // Word -> (before_context, after_context) pairs
     raw_training_text: String, // Raw training text for direct pattern matching
+    // TF-IDF for vector-based sentence selection
+    tfidf_vectors: Vec<HashMap<String, f64>>, // TF-IDF vectors for each sentence
+    idf_scores: HashMap<String, f64>, // Inverse document frequency for each word
+    total_sentences: usize, // Total number of sentences for IDF calculation
 }
 
 impl LanguageModel {
@@ -66,6 +70,9 @@ impl LanguageModel {
             word_to_contexts: HashMap::new(),
             context_windows: HashMap::new(),
             raw_training_text: String::new(),
+            tfidf_vectors: Vec::new(),
+            idf_scores: HashMap::new(),
+            total_sentences: 0,
         }
     }
     
