@@ -1378,7 +1378,7 @@ impl LanguageModel {
                 // Match word by word
                 for (i, query_word) in query_words.iter().enumerate() {
                     let query_word_lower = query_word.to_lowercase();
-                    let sentence_word = sentence_words[start_idx + i];
+                    let sentence_word = &sentence_words[start_idx + i];
                     
                     if wildcard_positions.contains(&i) {
                         // This is a wildcard position - capture the answer word
@@ -1397,7 +1397,7 @@ impl LanguageModel {
                         }
                     } else {
                         // This must match exactly (case-insensitive)
-                        if query_word_lower == sentence_word {
+                        if query_word_lower == *sentence_word {
                             match_score += 2; // Exact match gets higher score
                         } else {
                             matches = false;
