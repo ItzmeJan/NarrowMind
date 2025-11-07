@@ -1069,7 +1069,42 @@ impl LanguageModel {
             b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
         });
         
-        // Return top matching sentences
+        // #1 PREFERENCE: Power set matching - if we found good matches, use them
+        if !scored_contexts.is_empty() && scored_contexts[0].1 > 1.0 {
+            // Good matches found with power set - return them
+            return scored_contexts.into_iter().take(30).collect();
+        }
+        
+        // #2 PREFERENCE: Fallback to TF-IDF vector similarity
+        // Use when power set matching doesn't find strong matches
+        let tfidf_results = self.find_similar_contexts_tfidf(&normalized_query);
+        
+        if !tfidf_results.is_empty() {
+            // Combine power set results (if any) with TF-IDF results
+            // TF-IDF scores are typically 0-1, so scale them to be comparable
+            let mut combined: Vec<(usize, f64)> = scored_contexts;
+            
+            for (idx, tfidf_score) in tfidf_results {
+                // Scale TF-IDF score to be comparable (multiply by 10 to match power set scale)
+                let scaled_score = tfidf_score * 10.0;
+                
+                // Add or update score (take maximum)
+                if let Some(existing) = combined.iter_mut().find(|(i, _)| *i == idx) {
+                    existing.1 = existing.1.max(scaled_score);
+                } else {
+                    combined.push((idx, scaled_score));
+                }
+            }
+            
+            // Sort and return top matches
+            combined.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            
+            return combined.into_iter().take(30).collect();
+        }
+        
+        // Return power set results even if weak (better than nothing)
         scored_contexts.into_iter().take(30).collect()
     }
     

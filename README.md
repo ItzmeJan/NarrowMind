@@ -7,7 +7,8 @@ A lightweight question-answering system that learns from training text. Uses sta
 ## Features
 
 - **Multi-gram ensemble**: Weighted combination of bigrams and trigrams
-- **Direct pattern matching**: Fast first-layer search for exact answers
+- **Direct pattern matching**: Fast first-layer search for exact answers (#1 preference)
+- **TF-IDF vector search**: Cosine similarity for sentence selection (#2 preference)
 - **Sentence-based context**: Power set matching for relevant continuations
 - **Question answering**: Wildcard replacement (who, what, where, etc.)
 
@@ -18,7 +19,8 @@ A lightweight question-answering system that learns from training text. Uses sta
 - **Laplace Smoothing**: Probability estimation for unseen sequences
 - **Temperature Sampling**: Controls randomness in token selection
 - **Top-k Sampling**: Limits candidate pool to most likely tokens
-- **Power Set Matching**: Finds sentences matching query word combinations
+- **Power Set Matching**: Finds sentences matching query word combinations (#1)
+- **TF-IDF & Cosine Similarity**: Vector-based sentence ranking (#2 fallback)
 - **Direct Pattern Matching**: Fast exact text search for answers
 
 ## Usage
