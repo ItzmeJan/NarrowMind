@@ -1318,6 +1318,79 @@ impl LanguageModel {
         result
     }
 
+    /// Direct pattern matching: Replace wildcards with * and search training text
+    /// Returns answer if pattern found, None otherwise
+    fn try_direct_pattern_match(&self, query_tokens: &[String], wildcard_positions: &[usize]) -> Option<String> {
+        if wildcard_positions.is_empty() {
+            return None;
+        }
+        
+        // Build pattern: replace wildcards with * (normalized words)
+        let query_words_normalized: Vec<String> = query_tokens.iter()
+            .map(|t| self.extract_word(t).to_lowercase())
+            .collect();
+        
+        // Search through all stored contexts (sentences)
+        let mut best_matches: Vec<(String, usize)> = Vec::new(); // (answer_word, match_score)
+        
+        for context_entry in &self.contexts {
+            let sentence_words: Vec<String> = context_entry.tokens.iter()
+                .map(|t| self.extract_word(t).to_lowercase())
+                .collect();
+            
+            // Try to match the pattern in this sentence
+            // Pattern: query words with * in wildcard positions
+            for start_idx in 0..sentence_words.len() {
+                // Check if pattern matches starting at this position
+                if start_idx + query_words_normalized.len() > sentence_words.len() {
+                    continue;
+                }
+                
+                let mut matches = true;
+                let mut match_score = 0;
+                let mut answer_words = Vec::new();
+                
+                for (i, query_word) in query_words_normalized.iter().enumerate() {
+                    let sentence_word = &sentence_words[start_idx + i];
+                    
+                    if wildcard_positions.contains(&i) {
+                        // This is a wildcard position - capture the answer word
+                        answer_words.push(context_entry.tokens[start_idx + i].clone());
+                        match_score += 1; // Wildcard matches anything
+                    } else {
+                        // This must match exactly
+                        if query_word == sentence_word {
+                            match_score += 2; // Exact match gets higher score
+                        } else {
+                            matches = false;
+                            break;
+                        }
+                    }
+                }
+                
+                if matches && !answer_words.is_empty() {
+                    // Found a match! Use the first wildcard's answer (or combine if multiple)
+                    let answer = if answer_words.len() == 1 {
+                        answer_words[0].clone()
+                    } else {
+                        // Multiple wildcards - combine them
+                        self.format_tokens(&answer_words)
+                    };
+                    
+                    best_matches.push((answer, match_score));
+                }
+            }
+        }
+        
+        // Return the best match (highest score)
+        if !best_matches.is_empty() {
+            best_matches.sort_by(|a, b| b.1.cmp(&a.1));
+            return Some(best_matches[0].0.clone());
+        }
+        
+        None
+    }
+
     fn generate_response(&self, query: &str) -> String {
         let query_tokens = self.tokenize(query);
         
@@ -1335,6 +1408,34 @@ impl LanguageModel {
             })
             .map(|(i, _)| i)
             .collect();
+
+        // FIRST LAYER: Try direct pattern matching in training text
+        // Replace wildcards with * and search for exact matches
+        if !wildcard_positions.is_empty() {
+            if let Some(direct_answer) = self.try_direct_pattern_match(&query_tokens, &wildcard_positions) {
+                // Found a direct match! The answer contains the word(s) to replace wildcards
+                // For single wildcard, use the answer directly
+                // For multiple wildcards, the answer is formatted with all words
+                let mut response_tokens = query_tokens.clone();
+                
+                // Parse the answer to get individual words
+                let answer_tokens = self.tokenize(&direct_answer);
+                
+                // Replace each wildcard with corresponding answer word
+                for (idx, &wildcard_pos) in wildcard_positions.iter().enumerate() {
+                    if wildcard_pos < response_tokens.len() && idx < answer_tokens.len() {
+                        response_tokens[wildcard_pos] = answer_tokens[idx].clone();
+                    }
+                }
+                
+                // Generate continuation after replacing wildcard(s)
+                let context: Vec<String> = response_tokens[response_tokens.len().saturating_sub(self.n - 1)..].to_vec();
+                if let Some(continuation) = self.generate_continuation(&context, false) {
+                    response_tokens.push(continuation);
+                }
+                return self.format_tokens(&response_tokens);
+            }
+        }
 
         // If no wildcards, try simple continuation
         if wildcard_positions.is_empty() {
