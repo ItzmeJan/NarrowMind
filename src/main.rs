@@ -1342,17 +1342,47 @@ impl LanguageModel {
             return None;
         }
         
-        // Split training text into sentences by .!?
-        let sentences: Vec<&str> = self.raw_training_text
-            .split(|c: char| c == '.' || c == '!' || c == '?')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .collect();
+        // Split training text into sentences - keep track of sentence endings
+        // We need to preserve the full sentence with punctuation to extract phrases until sentence end
+        let mut sentences_with_endings: Vec<(String, usize)> = Vec::new();
+        let mut start = 0;
+        let text = &self.raw_training_text;
+        
+        for (i, ch) in text.char_indices() {
+            if ch == '.' || ch == '!' || ch == '?' {
+                // Check for ellipsis (...)
+                let is_ellipsis = if ch == '.' && i + 2 < text.len() {
+                    let next_chars: String = text.chars().skip(i + 1).take(2).collect();
+                    next_chars == ".."
+                } else {
+                    false
+                };
+                
+                let sentence = text[start..=i].trim();
+                if !sentence.is_empty() {
+                    sentences_with_endings.push((sentence.to_string(), i));
+                }
+                
+                if is_ellipsis {
+                    start = i + 3; // Skip the ellipsis
+                } else {
+                    start = i + 1;
+                }
+            }
+        }
+        
+        // Also add the last sentence if text doesn't end with punctuation
+        if start < text.len() {
+            let sentence = text[start..].trim();
+            if !sentence.is_empty() {
+                sentences_with_endings.push((sentence.to_string(), text.len()));
+            }
+        }
         
         let mut best_matches: Vec<(HashMap<usize, String>, usize)> = Vec::new();
         
         // Search each sentence
-        for sentence in sentences {
+        for (sentence, _) in &sentences_with_endings {
             // Split sentence into words (same way as query) - store as lowercase strings
             let sentence_words: Vec<String> = sentence.split_whitespace()
                 .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\''))
@@ -1363,6 +1393,13 @@ impl LanguageModel {
             if sentence_words.is_empty() {
                 continue;
             }
+            
+            // Get original sentence words with positions for phrase extraction
+            let original_words: Vec<(usize, &str)> = sentence.split_whitespace()
+                .map(|w| w.trim())
+                .filter(|w| !w.is_empty())
+                .enumerate()
+                .collect();
             
             // Try to match query pattern at every position in the sentence
             for start_idx in 0..sentence_words.len() {
@@ -1381,18 +1418,43 @@ impl LanguageModel {
                     let sentence_word = &sentence_words[start_idx + i];
                     
                     if wildcard_positions.contains(&i) {
-                        // This is a wildcard position - capture the answer word
-                        // Get the original word from the sentence (with original case)
-                        let original_sentence: Vec<&str> = sentence.split_whitespace()
-                            .map(|w| w.trim())
-                            .filter(|w| !w.is_empty())
-                            .collect();
+                        // This is a wildcard position - capture everything until sentence end
+                        let wildcard_word_idx = start_idx + i;
                         
-                        if start_idx + i < original_sentence.len() {
-                            // Extract just the word part (remove punctuation)
-                            let answer_word = original_sentence[start_idx + i]
-                                .trim_matches(|c: char| !c.is_alphanumeric() && c != '\'');
-                            answer_map.insert(i, answer_word.to_string());
+                        if wildcard_word_idx < original_words.len() {
+                            // Find the start position of this word in the original sentence
+                            let (word_pos_in_sentence, _) = original_words[wildcard_word_idx];
+                            
+                            // Extract phrase from this word until sentence end (., !, ?, or ...)
+                            // Find where the sentence ends in the original text
+                            let phrase_start = if word_pos_in_sentence > 0 {
+                                // Find the start of this word in the sentence string
+                                let mut char_pos = 0;
+                                let mut word_count = 0;
+                                for (idx, ch) in sentence.char_indices() {
+                                    if ch.is_whitespace() {
+                                        word_count += 1;
+                                        if word_count == word_pos_in_sentence {
+                                            char_pos = idx + 1;
+                                            break;
+                                        }
+                                    }
+                                }
+                                char_pos
+                            } else {
+                                0
+                            };
+                            
+                            // Extract from phrase_start until sentence end
+                            let phrase = &sentence[phrase_start..];
+                            
+                            // Trim any leading/trailing whitespace and remove sentence ending punctuation
+                            let answer_phrase = phrase.trim()
+                                .trim_end_matches(|c: char| c == '.' || c == '!' || c == '?')
+                                .trim_end_matches("...")
+                                .trim();
+                            
+                            answer_map.insert(i, answer_phrase.to_string());
                             match_score += 1;
                         }
                     } else {
