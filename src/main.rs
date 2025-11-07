@@ -1501,28 +1501,58 @@ impl LanguageModel {
         // Replace wildcards with * and search for exact matches
         if !wildcard_positions_words.is_empty() {
             if let Some(answer_map) = self.try_direct_pattern_match(query, &wildcard_positions_words) {
-                // Found a direct match! Replace wildcards with answer words from the map
-                // Map word positions back to token positions for replacement
-                let mut response_tokens = query_tokens.clone();
+                // Found a direct match! Replace wildcards with answer phrases from the map
+                // The answer phrases go until sentence end, so we don't need continuation
+                // Build response by replacing wildcard tokens with answer phrase tokens
+                let mut response_tokens = Vec::new();
+                let mut token_idx = 0;
                 
-                // For each wildcard word position, find corresponding token and replace
-                for (word_idx, &wildcard_word_pos) in wildcard_positions_words.iter().enumerate() {
-                    if let Some(answer_word) = answer_map.get(&wildcard_word_pos) {
-                        // Find the token that corresponds to this word position
-                        if word_idx < wildcard_positions_tokens.len() {
-                            let token_pos = wildcard_positions_tokens[word_idx];
-                            if token_pos < response_tokens.len() {
-                                response_tokens[token_pos] = answer_word.clone();
-                            }
-                        }
+                // Create a set of wildcard token positions for quick lookup
+                let wildcard_token_set: std::collections::HashSet<usize> = wildcard_positions_tokens.iter().cloned().collect();
+                
+                // Map word positions to token positions
+                let mut word_to_token_map: HashMap<usize, usize> = HashMap::new();
+                let mut word_idx = 0;
+                for (i, token) in query_tokens.iter().enumerate() {
+                    let word = self.extract_word(token);
+                    if !word.is_empty() {
+                        word_to_token_map.insert(word_idx, i);
+                        word_idx += 1;
                     }
                 }
                 
-                // Generate continuation after replacing wildcard(s)
-                let context: Vec<String> = response_tokens[response_tokens.len().saturating_sub(self.n - 1)..].to_vec();
-                if let Some(continuation) = self.generate_continuation(&context, false) {
-                    response_tokens.push(continuation);
+                while token_idx < query_tokens.len() {
+                    if wildcard_token_set.contains(&token_idx) {
+                        // This is a wildcard token - find which word position it corresponds to
+                        // and replace with the answer phrase
+                        let mut found = false;
+                        for (_word_idx, &wildcard_word_pos) in wildcard_positions_words.iter().enumerate() {
+                            if let Some(&token_pos) = word_to_token_map.get(&wildcard_word_pos) {
+                                if token_pos == token_idx {
+                                    if let Some(answer_phrase) = answer_map.get(&wildcard_word_pos) {
+                                        // Tokenize the answer phrase and add all tokens
+                                        let answer_tokens = self.tokenize(answer_phrase);
+                                        response_tokens.extend(answer_tokens);
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if !found {
+                            // Fallback: just skip the wildcard token
+                            token_idx += 1;
+                        } else {
+                            token_idx += 1;
+                        }
+                    } else {
+                        // Regular token - keep it
+                        response_tokens.push(query_tokens[token_idx].clone());
+                        token_idx += 1;
+                    }
                 }
+                
+                // The answer phrase already goes to sentence end, so just return it
                 return self.format_tokens(&response_tokens);
             }
         }
