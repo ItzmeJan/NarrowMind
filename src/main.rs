@@ -30,6 +30,7 @@ struct LanguageModel {
     contexts: Vec<ContextEntry>, // All sentence-level contexts from training data
     word_to_contexts: HashMap<String, Vec<usize>>, // Maps words to context indices where they appear
     context_windows: HashMap<String, Vec<(Vec<String>, Vec<String>)>>, // Word -> (before_context, after_context) pairs
+    raw_training_text: String, // Raw training text for direct pattern matching
 }
 
 impl LanguageModel {
@@ -66,6 +67,7 @@ impl LanguageModel {
             contexts: Vec::new(),
             word_to_contexts: HashMap::new(),
             context_windows: HashMap::new(),
+            raw_training_text: String::new(),
         }
     }
     
@@ -109,10 +111,14 @@ impl LanguageModel {
             contexts: Vec::new(),
             word_to_contexts: HashMap::new(),
             context_windows: HashMap::new(),
+            raw_training_text: String::new(),
         }
     }
 
     fn train(&mut self, text: &str) {
+        // Store raw training text for direct pattern matching
+        self.raw_training_text = text.to_string();
+        
         // FULL TEXT SCAN: Extract sentence-level contexts
         // Split text into sentences and store full contexts
         let sentences: Vec<&str> = text.split(|c: char| c == '.' || c == '!' || c == '?')
