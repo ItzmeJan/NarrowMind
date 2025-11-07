@@ -1422,39 +1422,23 @@ impl LanguageModel {
                         let wildcard_word_idx = start_idx + i;
                         
                         if wildcard_word_idx < original_words.len() {
-                            // Find the start position of this word in the original sentence
-                            let (word_pos_in_sentence, _) = original_words[wildcard_word_idx];
+                            // Join all words from this position until the end of the sentence
+                            let answer_words: Vec<&str> = original_words[wildcard_word_idx..]
+                                .iter()
+                                .map(|(_, word)| *word)
+                                .collect();
                             
-                            // Extract phrase from this word until sentence end (., !, ?, or ...)
-                            // Find where the sentence ends in the original text
-                            let phrase_start = if word_pos_in_sentence > 0 {
-                                // Find the start of this word in the sentence string
-                                let mut char_pos = 0;
-                                let mut word_count = 0;
-                                for (idx, ch) in sentence.char_indices() {
-                                    if ch.is_whitespace() {
-                                        word_count += 1;
-                                        if word_count == word_pos_in_sentence {
-                                            char_pos = idx + 1;
-                                            break;
-                                        }
-                                    }
-                                }
-                                char_pos
-                            } else {
-                                0
-                            };
+                            // Join with spaces and remove sentence ending punctuation
+                            let mut answer_phrase = answer_words.join(" ");
                             
-                            // Extract from phrase_start until sentence end
-                            let phrase = &sentence[phrase_start..];
-                            
-                            // Trim any leading/trailing whitespace and remove sentence ending punctuation
-                            let answer_phrase = phrase.trim()
-                                .trim_end_matches(|c: char| c == '.' || c == '!' || c == '?')
+                            // Remove sentence ending punctuation (., !, ?, or ...)
+                            answer_phrase = answer_phrase
                                 .trim_end_matches("...")
-                                .trim();
+                                .trim_end_matches(|c: char| c == '.' || c == '!' || c == '?')
+                                .trim()
+                                .to_string();
                             
-                            answer_map.insert(i, answer_phrase.to_string());
+                            answer_map.insert(i, answer_phrase);
                             match_score += 1;
                         }
                     } else {
