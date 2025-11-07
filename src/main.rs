@@ -1404,19 +1404,16 @@ impl LanguageModel {
         // FIRST LAYER: Try direct pattern matching in training text
         // Replace wildcards with * and search for exact matches
         if !wildcard_positions.is_empty() {
-            if let Some(direct_answer) = self.try_direct_pattern_match(&query_tokens, &wildcard_positions) {
-                // Found a direct match! The answer contains the word(s) to replace wildcards
-                // For single wildcard, use the answer directly
-                // For multiple wildcards, the answer is formatted with all words
+            if let Some(answer_map) = self.try_direct_pattern_match(&query_tokens, &wildcard_positions) {
+                // Found a direct match! Replace wildcards with answer words from the map
                 let mut response_tokens = query_tokens.clone();
                 
-                // Parse the answer to get individual words
-                let answer_tokens = self.tokenize(&direct_answer);
-                
-                // Replace each wildcard with corresponding answer word
-                for (idx, &wildcard_pos) in wildcard_positions.iter().enumerate() {
-                    if wildcard_pos < response_tokens.len() && idx < answer_tokens.len() {
-                        response_tokens[wildcard_pos] = answer_tokens[idx].clone();
+                // Replace each wildcard position with its corresponding answer word
+                for &wildcard_pos in &wildcard_positions {
+                    if let Some(answer_word) = answer_map.get(&wildcard_pos) {
+                        if wildcard_pos < response_tokens.len() {
+                            response_tokens[wildcard_pos] = answer_word.clone();
+                        }
                     }
                 }
                 
