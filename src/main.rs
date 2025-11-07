@@ -1319,8 +1319,8 @@ impl LanguageModel {
     }
 
     /// Direct pattern matching: Replace wildcards with * and search training text
-    /// Returns answer if pattern found, None otherwise
-    fn try_direct_pattern_match(&self, query_tokens: &[String], wildcard_positions: &[usize]) -> Option<String> {
+    /// Returns map of wildcard positions to answer words if pattern found, None otherwise
+    fn try_direct_pattern_match(&self, query_tokens: &[String], wildcard_positions: &[usize]) -> Option<HashMap<usize, String>> {
         if wildcard_positions.is_empty() {
             return None;
         }
@@ -1331,7 +1331,7 @@ impl LanguageModel {
             .collect();
         
         // Search through all stored contexts (sentences)
-        let mut best_matches: Vec<(String, usize)> = Vec::new(); // (answer_word, match_score)
+        let mut best_matches: Vec<(HashMap<usize, String>, usize)> = Vec::new(); // (wildcard_pos -> answer_word map, match_score)
         
         for context_entry in &self.contexts {
             let sentence_words: Vec<String> = context_entry.tokens.iter()
@@ -1348,14 +1348,14 @@ impl LanguageModel {
                 
                 let mut matches = true;
                 let mut match_score = 0;
-                let mut answer_words = Vec::new();
+                let mut answer_map: HashMap<usize, String> = HashMap::new();
                 
                 for (i, query_word) in query_words_normalized.iter().enumerate() {
                     let sentence_word = &sentence_words[start_idx + i];
                     
                     if wildcard_positions.contains(&i) {
                         // This is a wildcard position - capture the answer word
-                        answer_words.push(context_entry.tokens[start_idx + i].clone());
+                        answer_map.insert(i, context_entry.tokens[start_idx + i].clone());
                         match_score += 1; // Wildcard matches anything
                     } else {
                         // This must match exactly
@@ -1368,16 +1368,8 @@ impl LanguageModel {
                     }
                 }
                 
-                if matches && !answer_words.is_empty() {
-                    // Found a match! Use the first wildcard's answer (or combine if multiple)
-                    let answer = if answer_words.len() == 1 {
-                        answer_words[0].clone()
-                    } else {
-                        // Multiple wildcards - combine them
-                        self.format_tokens(&answer_words)
-                    };
-                    
-                    best_matches.push((answer, match_score));
+                if matches && !answer_map.is_empty() {
+                    best_matches.push((answer_map, match_score));
                 }
             }
         }
