@@ -370,8 +370,86 @@ impl LanguageModel {
         continuations.into_iter().collect()
     }
 
+    /// Get weighted candidates from all n-gram sizes
+    /// Combines predictions from bigrams, trigrams, etc. with their respective weights
+    fn get_multi_ngram_candidates(&self, context: &[String], query_words: &[String], stop_at_sentence_end: bool) -> Vec<(String, f64)> {
+        let mut combined_candidates: HashMap<String, f64> = HashMap::new();
+        
+        // Get candidates from each n-gram size
+        for &ngram_size in &self.ngram_sizes {
+            let weight = *self.ngram_weights.get(&ngram_size).unwrap_or(&0.0);
+            if weight == 0.0 {
+                continue;
+            }
+            
+            // Get candidates for this n-gram size
+            let candidates = self.get_ngram_candidates_for_size(ngram_size, context, query_words, stop_at_sentence_end);
+            
+            // Combine with weighted scores
+            for (token, count) in candidates {
+                *combined_candidates.entry(token).or_insert(0.0) += (count as f64) * weight;
+            }
+        }
+        
+        combined_candidates.into_iter().collect()
+    }
+    
+    /// Get n-gram candidates for a specific n-gram size
+    fn get_ngram_candidates_for_size(&self, ngram_size: usize, context: &[String], query_words: &[String], stop_at_sentence_end: bool) -> Vec<(String, u32)> {
+        let mut candidates: HashMap<String, u32> = HashMap::new();
+        
+        // Get the n-gram contexts for this size
+        let ngram_contexts = match self.multi_ngram_contexts.get(&ngram_size) {
+            Some(ctx) => ctx,
+            None => return Vec::new(),
+        };
+        
+        // Strategy 1: Try full n-gram context (n-1 tokens)
+        if context.len() >= ngram_size - 1 {
+            let context_key: Vec<String> = context[context.len().saturating_sub(ngram_size - 1)..].to_vec();
+            
+            if let Some(continuations) = ngram_contexts.get(&context_key) {
+                for (token, count) in continuations {
+                    *candidates.entry(token.clone()).or_insert(0) += count;
+                }
+            }
+        }
+        
+        // Strategy 2: Backoff to (n-2) context (if n > 2)
+        if candidates.is_empty() && ngram_size > 2 && context.len() >= ngram_size - 2 {
+            let context_key: Vec<String> = context[context.len().saturating_sub(ngram_size - 2)..].to_vec();
+            
+            for (ctx_key, continuations) in ngram_contexts {
+                if ctx_key.len() >= context_key.len() {
+                    let ctx_suffix = &ctx_key[ctx_key.len() - context_key.len()..];
+                    if ctx_suffix == context_key.as_slice() {
+                        for (token, count) in continuations {
+                            *candidates.entry(token.clone()).or_insert(0) += count;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Strategy 3: Backoff to bigram (last token only)
+        if candidates.is_empty() && context.len() >= 1 {
+            let last_token = &context[context.len() - 1];
+            
+            for (ctx_key, continuations) in ngram_contexts {
+                if !ctx_key.is_empty() && ctx_key[ctx_key.len() - 1] == *last_token {
+                    for (token, count) in continuations {
+                        *candidates.entry(token.clone()).or_insert(0) += count;
+                    }
+                }
+            }
+        }
+        
+        candidates.into_iter().collect()
+    }
+
     /// Get n-gram candidates with sentence-guided filtering
     /// Only includes n-grams that appear in top matching sentences
+    /// NOW USES MULTI-GRAM ENSEMBLE: combines all n-gram sizes with weights
     fn get_sentence_filtered_ngrams(&self, context: &[String], query_words: &[String], stop_at_sentence_end: bool) -> Vec<(String, u32)> {
         let mut ngram_candidates: HashMap<String, u32> = HashMap::new();
         
