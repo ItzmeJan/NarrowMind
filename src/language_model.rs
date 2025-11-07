@@ -117,6 +117,9 @@ impl LanguageModel {
             word_to_contexts: HashMap::new(),
             context_windows: HashMap::new(),
             raw_training_text: String::new(),
+            tfidf_vectors: Vec::new(),
+            idf_scores: HashMap::new(),
+            total_sentences: 0,
         }
     }
 
