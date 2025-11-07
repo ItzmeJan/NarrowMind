@@ -1,74 +1,29 @@
-# NarrowMind 🤖
+# NarrowMind
 
-**NarrowMind** is a **small, context-focused language model chatbot** that combines:
+N-gram language model with multi-gram ensemble and direct pattern matching.
 
-- **GPT intelligence** for natural, fluent responses
-- **Markov chains** for context-limited guidance
-- **Rule-based logic** for structured, predictable outputs
-- **Similarity-based querying** for FAQ-style or study material Q&A
+## Features
 
-> Lightweight, fast, and precise — designed for **controlled, coherent conversations**.
+- **Multi-gram ensemble**: Weighted combination of bigrams and trigrams
+- **Direct pattern matching**: Fast first-layer search for exact answers
+- **Sentence-based context**: Power set matching for relevant continuations
+- **Question answering**: Wildcard replacement (who, what, where, etc.)
 
----
+## Usage
 
-## 🌟 Features
+1. Place training data in `input.txt`
+2. Run: `cargo run`
+3. Ask questions using question words as wildcards:
+   - `who was getting ready`
+   - `what did mia realize`
+   - `she realized what`
 
-![Features Badge](https://img.shields.io/badge/Features-Context%2C%20Lite%2C%20Smart-blue)
+## Architecture
 
-- **Small & Efficient** – lightweight, low-resource
-- **Hybrid AI** – GPT + Markov + rules for focused responses
-- **FAQ & Knowledge Bot** – remembers & matches questions
-- **Study Mode** – ingest books/manuals and answer questions
-- **Custom Rules** – enforce tone, structure, or domain behavior
+- `src/main.rs` - CLI application
+- `src/language_model.rs` - Model implementation
 
----
+## Requirements
 
-## 📚 How It Works
-
-1. **Query Analysis** – interprets user input
-2. **Similarity Matching** – finds relevant context from past Q&A or texts
-3. **GPT Core** – generates fluent responses
-4. **Markov Chains** – guides word choice and sentence structure
-5. **Rules Engine** – ensures accurate, on-topic replies
-
-> Small model + smart context = precise & reliable answers
-
----
-
-## 🎯 Ideal Use Cases
-
-- **FAQ Bots** – precise, context-aware replies
-- **Study Assistants** – textbooks, manuals, or course material
-- **Domain-specific Chatbots** – technical, legal, medical, niche knowledge
-- **Interactive Guides** – controlled conversational guidance
-
----
-
-## ✨ Why NarrowMind
-
-![Why Badge](https://img.shields.io/badge/Why-Focused%2CPredictable%2CLightweight-green)
-
-- **Focused** – stays on-topic
-- **Predictable & Reliable** – blends probabilistic + rule-based reasoning
-- **Customizable** – tune rules & domain behavior
-- **Small but Smart** – lightweight, context-aware AI
-- **Fast & Efficient** – minimal resources
-
----
-
-## 🛠️ Tech Stack
-
-![Tech Badge](https://img.shields.io/badge/Tech-Rust%2CJS%2CGPT%2CMarkov%2CRules-blue)
-
-- **Rust & JS backend** – high-performance processing
-- **Markov Chains** – context-limited word prediction
-- **GPT API** – natural, fluent language generation
-- **Rules Engine** – structured, predictable responses
-
----
-
-## 📄 License
-
-![License Badge](https://img.shields.io/badge/License-MIT-orange)
-
-MIT License © 2025 NarrowMind
+- Rust 1.70+
+- Training data in `input.txt`
