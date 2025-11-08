@@ -402,6 +402,17 @@ impl LanguageModel {
             context_vector.insert(word, tf * idf);
         }
         
+        self.compute_tfidf_relevance_with_vector(candidate_word, &context_vector)
+    }
+    
+    /// Optimized version that uses a pre-computed context TF-IDF vector
+    fn compute_tfidf_relevance_with_vector(&self, candidate_word: &str, context_vector: &HashMap<String, f64>) -> f64 {
+        if self.tfidf_vectors.is_empty() {
+            return 1.0;
+        }
+        
+        let candidate_word_lower = self.extract_word(candidate_word).to_lowercase();
+        
         // Find sentences containing the candidate word and compute average similarity
         let mut total_similarity = 0.0;
         let mut sentence_count = 0;
@@ -413,7 +424,7 @@ impl LanguageModel {
         if let Some(sentence_indices) = self.word_to_contexts.get(&candidate_word_lower) {
             for &sentence_idx in sentence_indices.iter().take(10) { // Limit to top 10 for efficiency
                 if let Some(sentence_vector) = self.tfidf_vectors.get(sentence_idx) {
-                    let similarity = self.cosine_similarity(&context_vector, sentence_vector);
+                    let similarity = self.cosine_similarity(context_vector, sentence_vector);
                     if similarity > 0.0 {
                         total_similarity += similarity;
                         sentence_count += 1;
