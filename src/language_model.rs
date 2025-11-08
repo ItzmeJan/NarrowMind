@@ -9,7 +9,7 @@ type NGramContext = HashMap<Vec<String>, Vec<(String, u32)>>;
 #[derive(Clone)]
 struct ContextEntry {
     tokens: Vec<String>,
-    text: String, // Original text for reference
+    _text: String, // Original text for reference (kept for potential future use)
 }
 
 pub struct LanguageModel {
@@ -77,6 +77,7 @@ impl LanguageModel {
     }
     
     /// Create model with custom n-gram sizes and weights
+    #[allow(dead_code)]
     fn new_with_ngrams(ngram_sizes: Vec<usize>, weights: Vec<f64>) -> Self {
         if ngram_sizes.len() != weights.len() {
             panic!("ngram_sizes and weights must have the same length");
@@ -145,7 +146,7 @@ impl LanguageModel {
             let context_idx = self.contexts.len();
             self.contexts.push(ContextEntry {
                 tokens: sentence_tokens.clone(),
-                text: sentence.to_string(),
+                _text: sentence.to_string(),
             });
             
             // Map each word to contexts where it appears
@@ -376,12 +377,11 @@ impl LanguageModel {
     
     /// Compute TF-IDF relevance score for a candidate word given the context
     /// Returns a multiplier (>= 1.0) that boosts words more relevant to the context
+    #[allow(dead_code)]
     fn compute_tfidf_relevance(&self, candidate_word: &str, context_words: &[String]) -> f64 {
         if context_words.is_empty() || self.tfidf_vectors.is_empty() {
             return 1.0; // No boost if no context or no TF-IDF data
         }
-        
-        let candidate_word_lower = self.extract_word(candidate_word).to_lowercase();
         
         // Build TF-IDF vector for the context
         let mut context_vector: HashMap<String, f64> = HashMap::new();
@@ -498,6 +498,7 @@ impl LanguageModel {
         token.ends_with('.') || token.ends_with('!') || token.ends_with('?')
     }
 
+    #[allow(dead_code)]
     fn is_pause(&self, token: &str) -> bool {
         token.ends_with(',') || token.ends_with(';') || token.ends_with(':')
     }
@@ -602,6 +603,7 @@ impl LanguageModel {
 
     /// Get weighted candidates from all n-gram sizes
     /// Combines predictions from bigrams, trigrams, etc. with their respective weights
+    #[allow(dead_code)]
     fn get_multi_ngram_candidates(&self, context: &[String], query_words: &[String], stop_at_sentence_end: bool) -> Vec<(String, f64)> {
         let mut combined_candidates: HashMap<String, f64> = HashMap::new();
         
@@ -625,7 +627,7 @@ impl LanguageModel {
     }
     
     /// Get n-gram candidates for a specific n-gram size
-    fn get_ngram_candidates_for_size(&self, ngram_size: usize, context: &[String], query_words: &[String], stop_at_sentence_end: bool) -> Vec<(String, u32)> {
+    fn get_ngram_candidates_for_size(&self, ngram_size: usize, context: &[String], _query_words: &[String], _stop_at_sentence_end: bool) -> Vec<(String, u32)> {
         let mut candidates: HashMap<String, u32> = HashMap::new();
         
         // Get the n-gram contexts for this size
@@ -680,7 +682,7 @@ impl LanguageModel {
     /// Get n-gram candidates with sentence-guided filtering
     /// Only includes n-grams that appear in top matching sentences
     /// NOW USES MULTI-GRAM ENSEMBLE: combines all n-gram sizes with weights
-    fn get_sentence_filtered_ngrams(&self, context: &[String], query_words: &[String], stop_at_sentence_end: bool) -> Vec<(String, u32)> {
+    fn get_sentence_filtered_ngrams(&self, context: &[String], query_words: &[String], _stop_at_sentence_end: bool) -> Vec<(String, u32)> {
         let mut ngram_candidates: HashMap<String, u32> = HashMap::new();
         
         // Get top matching sentences to use as filter and for weighting
@@ -805,7 +807,6 @@ impl LanguageModel {
         let direct_count = direct_continuations.len();
         let sentence_count = sentence_based_tokens.len();
         let ngram_count = ngram_candidates.len();
-        let total_sources = (direct_count > 0) as usize + (sentence_count > 0) as usize + (ngram_count > 0) as usize;
         
         // Adaptive weights: if we have good direct continuations, prioritize them more
         let direct_weight = if direct_count > 0 {
