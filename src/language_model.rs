@@ -1855,12 +1855,23 @@ impl LanguageModel {
             }
             
             if !candidates.is_empty() {
+                // Get context words for TF-IDF relevance scoring (non-wildcard words)
+                let context_words_for_tfidf: Vec<String> = response_tokens.iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != wildcard_pos)
+                    .map(|(_, token)| self.extract_word(token).to_lowercase())
+                    .collect();
+                
                 // Use weighted random selection with temperature and top-k
+                // Apply TF-IDF relevance boost to candidates
                 let mut smoothed_candidates: Vec<(String, f64)> = candidates
                     .iter()
                     .map(|(token, count)| {
                         let smoothed_count = (*count as f64) + 1.0;
-                        (token.clone(), smoothed_count)
+                        // Apply TF-IDF relevance boost
+                        let tfidf_boost = self.compute_tfidf_relevance(token, &context_words_for_tfidf);
+                        let boosted_count = smoothed_count * tfidf_boost;
+                        (token.clone(), boosted_count)
                     })
                     .collect();
 
