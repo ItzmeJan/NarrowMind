@@ -831,10 +831,42 @@ impl LanguageModel {
             (0.0, 0.0, 0.0)
         };
         
+        // Pre-compute TF-IDF vector for context (reuse for all candidates)
+        let context_tfidf_vector = if !context_words.is_empty() && !self.tfidf_vectors.is_empty() {
+            let mut context_tf: HashMap<String, usize> = HashMap::new();
+            let context_word_count = context_words.len();
+            
+            for word in &context_words {
+                let normalized_word = self.extract_word(word).to_lowercase();
+                if !self.is_question_word(&normalized_word) {
+                    *context_tf.entry(normalized_word).or_insert(0) += 1;
+                }
+            }
+            
+            let mut context_vector: HashMap<String, f64> = HashMap::new();
+            for (word, count) in context_tf {
+                let tf = count as f64 / context_word_count as f64;
+                let idf = *self.idf_scores.get(&word).unwrap_or(&0.0);
+                context_vector.insert(word, tf * idf);
+            }
+            Some(context_vector)
+        } else {
+            None
+        };
+        
+        // Helper to compute TF-IDF boost using pre-computed context vector
+        let compute_tfidf_boost = |token: &str| -> f64 {
+            if let Some(ref context_vec) = context_tfidf_vector {
+                self.compute_tfidf_relevance_with_vector(token, context_vec)
+            } else {
+                1.0
+            }
+        };
+        
         // Apply TF-IDF relevance scoring to boost contextually relevant candidates
         // Add direct sentence continuations (highest priority, most natural)
         for (token, score) in direct_continuations {
-            let tfidf_boost = self.compute_tfidf_relevance(&token, &context_words);
+            let tfidf_boost = compute_tfidf_boost(&token);
             let boosted_score = score as f64 * direct_weight * tfidf_boost;
             
             if stop_at_sentence_end {
@@ -850,7 +882,7 @@ impl LanguageModel {
         
         // Add sentence-based candidates (secondary source)
         for (token, score) in sentence_based_tokens {
-            let tfidf_boost = self.compute_tfidf_relevance(&token, &context_words);
+            let tfidf_boost = compute_tfidf_boost(&token);
             let boosted_score = score as f64 * sentence_weight * tfidf_boost;
             
             if stop_at_sentence_end {
@@ -866,7 +898,7 @@ impl LanguageModel {
         
         // Add n-gram candidates (filtered by sentences for context relevance)
         for (token, count) in ngram_candidates {
-            let tfidf_boost = self.compute_tfidf_relevance(&token, &context_words);
+            let tfidf_boost = compute_tfidf_boost(&token);
             let boosted_score = count as f64 * ngram_weight * tfidf_boost;
             
             if stop_at_sentence_end {
