@@ -1915,6 +1915,38 @@ impl LanguageModel {
                     .map(|(_, token)| self.extract_word(token).to_lowercase())
                     .collect();
                 
+                // Pre-compute TF-IDF vector for context (reuse for all candidates)
+                let wildcard_context_vector = if !context_words_for_tfidf.is_empty() && !self.tfidf_vectors.is_empty() {
+                    let mut context_tf: HashMap<String, usize> = HashMap::new();
+                    let context_word_count = context_words_for_tfidf.len();
+                    
+                    for word in &context_words_for_tfidf {
+                        // context_words_for_tfidf is already lowercased and extracted
+                        if !self.is_question_word(word) {
+                            *context_tf.entry(word.clone()).or_insert(0) += 1;
+                        }
+                    }
+                    
+                    let mut context_vector: HashMap<String, f64> = HashMap::new();
+                    for (word, count) in context_tf {
+                        let tf = count as f64 / context_word_count as f64;
+                        let idf = *self.idf_scores.get(&word).unwrap_or(&0.0);
+                        context_vector.insert(word, tf * idf);
+                    }
+                    Some(context_vector)
+                } else {
+                    None
+                };
+                
+                // Helper to compute TF-IDF boost using pre-computed context vector
+                let compute_wildcard_tfidf_boost = |token: &str| -> f64 {
+                    if let Some(ref context_vec) = wildcard_context_vector {
+                        self.compute_tfidf_relevance_with_vector(token, context_vec)
+                    } else {
+                        1.0
+                    }
+                };
+                
                 // Use weighted random selection with temperature and top-k
                 // Apply TF-IDF relevance boost to candidates
                 let mut smoothed_candidates: Vec<(String, f64)> = candidates
@@ -1922,7 +1954,7 @@ impl LanguageModel {
                     .map(|(token, count)| {
                         let smoothed_count = (*count as f64) + 1.0;
                         // Apply TF-IDF relevance boost
-                        let tfidf_boost = self.compute_tfidf_relevance(token, &context_words_for_tfidf);
+                        let tfidf_boost = compute_wildcard_tfidf_boost(token);
                         let boosted_count = smoothed_count * tfidf_boost;
                         (token.clone(), boosted_count)
                     })
