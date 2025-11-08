@@ -373,68 +373,6 @@ impl LanguageModel {
         let denominator = (norm1.sqrt() * norm2.sqrt()).max(1e-10); // Avoid division by zero
         dot_product / denominator
     }
-    
-    /// Compute TF-IDF relevance boost for a candidate token given context
-    /// Returns a multiplier (1.0 = no boost, >1.0 = higher relevance)
-    /// Higher TF-IDF similarity to context = higher boost
-    fn compute_tfidf_relevance_boost(&self, candidate_token: &str, context_words: &[String]) -> f64 {
-        if self.tfidf_vectors.is_empty() || context_words.is_empty() {
-            return 1.0; // No boost if no TF-IDF data
-        }
-        
-        // Build TF-IDF vector for context
-        let mut context_tf: HashMap<String, usize> = HashMap::new();
-        for word in context_words {
-            let normalized_word = self.extract_word(word).to_lowercase();
-            if !self.is_question_word(&normalized_word) {
-                *context_tf.entry(normalized_word).or_insert(0) += 1;
-            }
-        }
-        
-        if context_tf.is_empty() {
-            return 1.0;
-        }
-        
-        let context_word_count = context_words.len();
-        let mut context_vector: HashMap<String, f64> = HashMap::new();
-        for (word, count) in context_tf {
-            let tf = count as f64 / context_word_count as f64;
-            let idf = *self.idf_scores.get(&word).unwrap_or(&0.0);
-            context_vector.insert(word, tf * idf);
-        }
-        
-        // Find sentences containing this candidate token
-        let candidate_word = self.extract_word(candidate_token).to_lowercase();
-        if candidate_word.is_empty() {
-            return 1.0;
-        }
-        
-        // Get context indices where this word appears
-        let context_indices = self.word_to_contexts.get(&candidate_word);
-        if context_indices.is_none() || context_indices.unwrap().is_empty() {
-            return 1.0; // Word not found in training data
-        }
-        
-        // Find maximum TF-IDF similarity among sentences containing this candidate
-        let mut max_similarity = 0.0;
-        for &ctx_idx in context_indices.unwrap() {
-            if let Some(sentence_vector) = self.tfidf_vectors.get(ctx_idx) {
-                let similarity = self.cosine_similarity(&context_vector, sentence_vector);
-                max_similarity = max_similarity.max(similarity);
-            }
-        }
-        
-        // Convert similarity (0-1) to boost multiplier
-        // Similarity 0.0 = 1.0x (no boost)
-        // Similarity 0.5 = 1.5x (moderate boost)
-        // Similarity 1.0 = 2.5x (strong boost)
-        // Use exponential scaling for better differentiation
-        if max_similarity > 0.0 {
-            1.0 + (max_similarity * 1.5) // Boost range: 1.0x to 2.5x
-        } else {
-            1.0
-        }
-    }
 
     fn tokenize(&self, text: &str) -> Vec<String> {
         let mut tokens = Vec::new();
@@ -820,52 +758,40 @@ impl LanguageModel {
         };
         
         // Add direct sentence continuations (highest priority, most natural)
-        // Apply TF-IDF relevance boost to prioritize contextually relevant candidates
         for (token, score) in direct_continuations {
-            let tfidf_boost = self.compute_tfidf_relevance_boost(&token, &context_words);
-            let boosted_score = score as f64 * direct_weight * tfidf_boost;
-            
             if stop_at_sentence_end {
                 if self.is_sentence_ender(&token) {
-                    *combined_candidates.entry(token.clone()).or_insert(0.0) += boosted_score;
+                    *combined_candidates.entry(token.clone()).or_insert(0.0) += score as f64 * direct_weight;
                 }
             } else {
                 if !self.is_sentence_ender(&token) {
-                    *combined_candidates.entry(token.clone()).or_insert(0.0) += boosted_score;
+                    *combined_candidates.entry(token.clone()).or_insert(0.0) += score as f64 * direct_weight;
                 }
             }
         }
         
         // Add sentence-based candidates (secondary source)
-        // Apply TF-IDF relevance boost
         for (token, score) in sentence_based_tokens {
-            let tfidf_boost = self.compute_tfidf_relevance_boost(&token, &context_words);
-            let boosted_score = score as f64 * sentence_weight * tfidf_boost;
-            
             if stop_at_sentence_end {
                 if self.is_sentence_ender(&token) {
-                    *combined_candidates.entry(token.clone()).or_insert(0.0) += boosted_score;
+                    *combined_candidates.entry(token.clone()).or_insert(0.0) += score as f64 * sentence_weight;
                 }
             } else {
                 if !self.is_sentence_ender(&token) {
-                    *combined_candidates.entry(token.clone()).or_insert(0.0) += boosted_score;
+                    *combined_candidates.entry(token.clone()).or_insert(0.0) += score as f64 * sentence_weight;
                 }
             }
         }
         
         // Add n-gram candidates (filtered by sentences for context relevance)
-        // Apply TF-IDF relevance boost
         for (token, count) in ngram_candidates {
-            let tfidf_boost = self.compute_tfidf_relevance_boost(&token, &context_words);
-            let boosted_score = count as f64 * ngram_weight * tfidf_boost;
-            
             if stop_at_sentence_end {
                 if self.is_sentence_ender(&token) {
-                    *combined_candidates.entry(token.clone()).or_insert(0.0) += boosted_score;
+                    *combined_candidates.entry(token.clone()).or_insert(0.0) += count as f64 * ngram_weight;
                 }
             } else {
                 if !self.is_sentence_ender(&token) {
-                    *combined_candidates.entry(token.clone()).or_insert(0.0) += boosted_score;
+                    *combined_candidates.entry(token.clone()).or_insert(0.0) += count as f64 * ngram_weight;
                 }
             }
         }
