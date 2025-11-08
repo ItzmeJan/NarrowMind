@@ -172,10 +172,6 @@ NarrowMind/
 | **Semantic Search** | ✅ TF-IDF vectors | ✅ Embeddings |
 | **Interpretability** | ✅ High (statistical) | ⚠️ Lower (black box) |
 
-## License
-
-[Add your license here]
-
 ---
 
 **NarrowMind**: Think small, understand deeply. 🧠
