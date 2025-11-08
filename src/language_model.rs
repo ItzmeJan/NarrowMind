@@ -373,6 +373,80 @@ impl LanguageModel {
         let denominator = (norm1.sqrt() * norm2.sqrt()).max(1e-10); // Avoid division by zero
         dot_product / denominator
     }
+    
+    /// Compute TF-IDF relevance score for a candidate word given the context
+    /// Returns a multiplier (>= 1.0) that boosts words more relevant to the context
+    fn compute_tfidf_relevance(&self, candidate_word: &str, context_words: &[String]) -> f64 {
+        if context_words.is_empty() || self.tfidf_vectors.is_empty() {
+            return 1.0; // No boost if no context or no TF-IDF data
+        }
+        
+        let candidate_word_lower = self.extract_word(candidate_word).to_lowercase();
+        
+        // Build TF-IDF vector for the context
+        let mut context_vector: HashMap<String, f64> = HashMap::new();
+        let mut context_tf: HashMap<String, usize> = HashMap::new();
+        let context_word_count = context_words.len();
+        
+        for word in context_words {
+            let normalized_word = self.extract_word(word).to_lowercase();
+            if !self.is_question_word(&normalized_word) {
+                *context_tf.entry(normalized_word).or_insert(0) += 1;
+            }
+        }
+        
+        // Compute TF-IDF for context
+        for (word, count) in context_tf {
+            let tf = count as f64 / context_word_count as f64;
+            let idf = *self.idf_scores.get(&word).unwrap_or(&0.0);
+            context_vector.insert(word, tf * idf);
+        }
+        
+        // Find sentences containing the candidate word and compute average similarity
+        let mut total_similarity = 0.0;
+        let mut sentence_count = 0;
+        
+        // Get IDF score of candidate word (how important/rare it is)
+        let candidate_idf = *self.idf_scores.get(&candidate_word_lower).unwrap_or(&0.0);
+        
+        // Find sentences that contain the candidate word
+        if let Some(sentence_indices) = self.word_to_contexts.get(&candidate_word_lower) {
+            for &sentence_idx in sentence_indices.iter().take(10) { // Limit to top 10 for efficiency
+                if let Some(sentence_vector) = self.tfidf_vectors.get(sentence_idx) {
+                    let similarity = self.cosine_similarity(&context_vector, sentence_vector);
+                    if similarity > 0.0 {
+                        total_similarity += similarity;
+                        sentence_count += 1;
+                    }
+                }
+            }
+        }
+        
+        // Compute relevance score:
+        // 1. Average similarity with sentences containing the candidate (0-1 range)
+        // 2. IDF score of candidate (normalized, 0-1 range)
+        // Combine them for a relevance multiplier
+        
+        let avg_similarity = if sentence_count > 0 {
+            total_similarity / sentence_count as f64
+        } else {
+            0.0
+        };
+        
+        // Normalize IDF (assuming max IDF is around 5-6 for rare words)
+        // Use log scale: normalize to 0-1 range
+        let normalized_idf = (candidate_idf / 6.0).min(1.0).max(0.0);
+        
+        // Relevance multiplier: 
+        // - Base: 1.0 (no boost)
+        // - Similarity boost: up to 2.0x for high similarity
+        // - IDF boost: up to 1.5x for important/rare words
+        // Combined: 1.0 to ~3.5x multiplier
+        let similarity_boost = 1.0 + avg_similarity; // 1.0 to 2.0
+        let idf_boost = 1.0 + (normalized_idf * 0.5); // 1.0 to 1.5
+        
+        similarity_boost * idf_boost
+    }
 
     fn tokenize(&self, text: &str) -> Vec<String> {
         let mut tokens = Vec::new();
@@ -757,41 +831,51 @@ impl LanguageModel {
             (0.0, 0.0, 0.0)
         };
         
+        // Apply TF-IDF relevance scoring to boost contextually relevant candidates
         // Add direct sentence continuations (highest priority, most natural)
         for (token, score) in direct_continuations {
+            let tfidf_boost = self.compute_tfidf_relevance(&token, &context_words);
+            let boosted_score = score as f64 * direct_weight * tfidf_boost;
+            
             if stop_at_sentence_end {
                 if self.is_sentence_ender(&token) {
-                    *combined_candidates.entry(token.clone()).or_insert(0.0) += score as f64 * direct_weight;
+                    *combined_candidates.entry(token.clone()).or_insert(0.0) += boosted_score;
                 }
             } else {
                 if !self.is_sentence_ender(&token) {
-                    *combined_candidates.entry(token.clone()).or_insert(0.0) += score as f64 * direct_weight;
+                    *combined_candidates.entry(token.clone()).or_insert(0.0) += boosted_score;
                 }
             }
         }
         
         // Add sentence-based candidates (secondary source)
         for (token, score) in sentence_based_tokens {
+            let tfidf_boost = self.compute_tfidf_relevance(&token, &context_words);
+            let boosted_score = score as f64 * sentence_weight * tfidf_boost;
+            
             if stop_at_sentence_end {
                 if self.is_sentence_ender(&token) {
-                    *combined_candidates.entry(token.clone()).or_insert(0.0) += score as f64 * sentence_weight;
+                    *combined_candidates.entry(token.clone()).or_insert(0.0) += boosted_score;
                 }
             } else {
                 if !self.is_sentence_ender(&token) {
-                    *combined_candidates.entry(token.clone()).or_insert(0.0) += score as f64 * sentence_weight;
+                    *combined_candidates.entry(token.clone()).or_insert(0.0) += boosted_score;
                 }
             }
         }
         
         // Add n-gram candidates (filtered by sentences for context relevance)
         for (token, count) in ngram_candidates {
+            let tfidf_boost = self.compute_tfidf_relevance(&token, &context_words);
+            let boosted_score = count as f64 * ngram_weight * tfidf_boost;
+            
             if stop_at_sentence_end {
                 if self.is_sentence_ender(&token) {
-                    *combined_candidates.entry(token.clone()).or_insert(0.0) += count as f64 * ngram_weight;
+                    *combined_candidates.entry(token.clone()).or_insert(0.0) += boosted_score;
                 }
             } else {
                 if !self.is_sentence_ender(&token) {
-                    *combined_candidates.entry(token.clone()).or_insert(0.0) += count as f64 * ngram_weight;
+                    *combined_candidates.entry(token.clone()).or_insert(0.0) += boosted_score;
                 }
             }
         }
