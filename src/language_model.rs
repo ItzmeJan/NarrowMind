@@ -910,7 +910,8 @@ impl LanguageModel {
                 
                 if let Some(continuations) = ngram_contexts.get(&context_key) {
                     for (token, count) in continuations {
-                        *fallback_candidates.entry(token.clone()).or_insert(0.0) += (*count as f64) * ngram_weight;
+                        let tfidf_boost = self.compute_tfidf_relevance(&token, &context_words);
+                        *fallback_candidates.entry(token.clone()).or_insert(0.0) += (*count as f64) * ngram_weight * tfidf_boost;
                     }
                 }
             }
@@ -924,7 +925,8 @@ impl LanguageModel {
                         let ctx_suffix = &ctx_key[ctx_key.len() - context_key.len()..];
                         if ctx_suffix == context_key.as_slice() {
                             for (token, count) in continuations {
-                                *fallback_candidates.entry(token.clone()).or_insert(0.0) += (*count as f64) * ngram_weight;
+                                let tfidf_boost = self.compute_tfidf_relevance(&token, &context_words);
+                                *fallback_candidates.entry(token.clone()).or_insert(0.0) += (*count as f64) * ngram_weight * tfidf_boost;
                             }
                         }
                     }
@@ -938,7 +940,8 @@ impl LanguageModel {
                 for (ctx_key, continuations) in ngram_contexts {
                     if !ctx_key.is_empty() && ctx_key[ctx_key.len() - 1] == *last_token {
                         for (token, count) in continuations {
-                            *fallback_candidates.entry(token.clone()).or_insert(0.0) += (*count as f64) * ngram_weight;
+                            let tfidf_boost = self.compute_tfidf_relevance(&token, &context_words);
+                            *fallback_candidates.entry(token.clone()).or_insert(0.0) += (*count as f64) * ngram_weight * tfidf_boost;
                         }
                     }
                 }
