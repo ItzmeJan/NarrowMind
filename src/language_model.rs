@@ -1115,6 +1115,7 @@ impl LanguageModel {
     /// - temperature < 1.0: more deterministic, focused on high-probability tokens
     /// - temperature = 1.0: normal randomness
     /// - temperature > 1.0: more random, flatter distribution
+    #[allow(dead_code)]
     pub fn set_temperature(&mut self, temperature: f64) {
         self.temperature = temperature.max(0.01); // Prevent division by zero
     }
@@ -1122,6 +1123,7 @@ impl LanguageModel {
     /// Set the top-k value for sampling (only consider top-k most likely tokens)
     /// - top_k = 0: no limit, consider all candidates
     /// - top_k > 0: only consider top-k candidates (reduces low-quality outputs)
+    #[allow(dead_code)]
     pub fn set_top_k(&mut self, top_k: usize) {
         self.top_k = top_k;
     }
