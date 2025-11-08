@@ -936,6 +936,16 @@ impl LanguageModel {
         // Use weighted combination from all n-gram sizes
         let mut fallback_candidates: HashMap<String, f64> = HashMap::new();
         
+        // Reuse context TF-IDF vector if available, otherwise compute it
+        let fallback_context_vector = context_tfidf_vector.clone();
+        let compute_fallback_tfidf_boost = |token: &str| -> f64 {
+            if let Some(ref context_vec) = fallback_context_vector {
+                self.compute_tfidf_relevance_with_vector(token, context_vec)
+            } else {
+                1.0
+            }
+        };
+        
         for &ngram_size in &self.ngram_sizes {
             let ngram_weight = *self.ngram_weights.get(&ngram_size).unwrap_or(&0.0);
             if ngram_weight == 0.0 {
@@ -953,7 +963,7 @@ impl LanguageModel {
                 
                 if let Some(continuations) = ngram_contexts.get(&context_key) {
                     for (token, count) in continuations {
-                        let tfidf_boost = self.compute_tfidf_relevance(&token, &context_words);
+                        let tfidf_boost = compute_fallback_tfidf_boost(&token);
                         *fallback_candidates.entry(token.clone()).or_insert(0.0) += (*count as f64) * ngram_weight * tfidf_boost;
                     }
                 }
@@ -968,7 +978,7 @@ impl LanguageModel {
                         let ctx_suffix = &ctx_key[ctx_key.len() - context_key.len()..];
                         if ctx_suffix == context_key.as_slice() {
                             for (token, count) in continuations {
-                                let tfidf_boost = self.compute_tfidf_relevance(&token, &context_words);
+                                let tfidf_boost = compute_fallback_tfidf_boost(&token);
                                 *fallback_candidates.entry(token.clone()).or_insert(0.0) += (*count as f64) * ngram_weight * tfidf_boost;
                             }
                         }
@@ -983,7 +993,7 @@ impl LanguageModel {
                 for (ctx_key, continuations) in ngram_contexts {
                     if !ctx_key.is_empty() && ctx_key[ctx_key.len() - 1] == *last_token {
                         for (token, count) in continuations {
-                            let tfidf_boost = self.compute_tfidf_relevance(&token, &context_words);
+                            let tfidf_boost = compute_fallback_tfidf_boost(&token);
                             *fallback_candidates.entry(token.clone()).or_insert(0.0) += (*count as f64) * ngram_weight * tfidf_boost;
                         }
                     }
