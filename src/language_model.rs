@@ -698,32 +698,28 @@ impl LanguageModel {
         }
         
         // Build enhanced query vector with trimmed words (ONLY from keywords, not question words)
+        // KEYWORDS ARE ORDER-INDEPENDENT: All keywords get equal weight regardless of position
+        // This makes "Aria walked where" and "where did aria walk" have identical query vectors
         let mut query_vector: HashMap<String, f64> = HashMap::new();
         let mut query_tf: HashMap<String, f64> = HashMap::new();
         
-        // Compute positional weights relative to keywords only (ignore wildcard positions)
-        // This makes "Where was Aria walking" and "Aria walked where" have same keyword positions
-        let keyword_count = keywords.len();
-        
         // Build query vector with full words and trimmed variations (keywords only)
-        for (keyword_idx, (_, normalized_word)) in keywords.iter().enumerate() {
-            // Use keyword-relative position, not absolute position in query
-            // This ensures "Aria" and "walking" have same relative positions regardless of wildcard placement
-            let keyword_relative_pos = keyword_idx;
-            let pos_weight = Self::compute_positional_weight(keyword_relative_pos, keyword_count);
-            *query_tf.entry(normalized_word.clone()).or_insert(0.0) += pos_weight;
+        // Use equal weights for all keywords (order-independent matching)
+        for (_, normalized_word) in &keywords {
+            // All keywords get equal weight (1.0) - order doesn't matter
+            *query_tf.entry(normalized_word.clone()).or_insert(0.0) += 1.0;
             
             // Add trimmed word variations (prefixes)
             let trimmed_set = Self::generate_trimmed_word_set(normalized_word);
             for trimmed in trimmed_set {
-                *query_tf.entry(trimmed).or_insert(0.0) += pos_weight * 0.3; // Reduced weight for trimmed
+                *query_tf.entry(trimmed).or_insert(0.0) += 0.3; // Reduced weight for trimmed
             }
             
             // Add word stem variations (suffix trimming) - makes "walk" match "walked", "walking"
             let stem_variations = Self::generate_word_stem_variations(normalized_word);
             for stem in stem_variations {
                 if stem != *normalized_word { // Don't duplicate the original word
-                    *query_tf.entry(stem).or_insert(0.0) += pos_weight * 0.5; // Medium weight for stem variations
+                    *query_tf.entry(stem).or_insert(0.0) += 0.5; // Medium weight for stem variations
                 }
             }
         }
