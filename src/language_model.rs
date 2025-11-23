@@ -359,6 +359,95 @@ impl LanguageModel {
             
             self.tfidf_vectors.push(tfidf_vector);
         }
+        
+        // Step 4: Compute enhanced TF-IDF vectors with trimmed words and positional info
+        self.compute_enhanced_tfidf();
+    }
+    
+    /// Compute enhanced TF-IDF vectors with trimmed words (2-4 chars) and positional weighting
+    fn compute_enhanced_tfidf(&mut self) {
+        if self.total_sentences == 0 {
+            return;
+        }
+        
+        // Step 1: Count document frequency for trimmed words
+        let mut trimmed_document_frequency: HashMap<String, usize> = HashMap::new();
+        let mut trimmed_idf_scores: HashMap<String, f64> = HashMap::new();
+        
+        // First pass: count document frequency for all trimmed words
+        for context in &self.contexts {
+            let mut sentence_trimmed_words: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for token in &context.tokens {
+                let word = self.extract_word(token).to_lowercase();
+                if !self.is_question_word(&word) {
+                    let trimmed_set = Self::generate_trimmed_word_set(&word);
+                    for trimmed in trimmed_set {
+                        sentence_trimmed_words.insert(trimmed);
+                    }
+                }
+            }
+            for trimmed_word in sentence_trimmed_words {
+                *trimmed_document_frequency.entry(trimmed_word).or_insert(0) += 1;
+            }
+        }
+        
+        // Step 2: Compute IDF for trimmed words
+        for (trimmed_word, df) in &trimmed_document_frequency {
+            let idf = ((self.total_sentences as f64) / (1.0 + *df as f64)).ln();
+            trimmed_idf_scores.insert(trimmed_word.clone(), idf);
+        }
+        
+        // Step 3: Compute enhanced TF-IDF vectors with positional weighting
+        self.tfidf_vectors_enhanced.clear();
+        self.word_positions.clear();
+        
+        for (ctx_idx, context) in self.contexts.iter().enumerate() {
+            let mut enhanced_vector: HashMap<String, f64> = HashMap::new();
+            let mut word_pos_map: HashMap<String, Vec<usize>> = HashMap::new();
+            let sentence_length = context.tokens.len();
+            
+            // Count term frequency with positional weighting
+            let mut term_frequency: HashMap<String, f64> = HashMap::new();
+            let mut total_weighted_count = 0.0;
+            
+            for (pos, token) in context.tokens.iter().enumerate() {
+                let word = self.extract_word(token).to_lowercase();
+                if !self.is_question_word(&word) {
+                    // Store word position
+                    word_pos_map.entry(word.clone()).or_insert_with(Vec::new).push(pos);
+                    
+                    // Compute positional weight
+                    let pos_weight = Self::compute_positional_weight(pos, sentence_length);
+                    
+                    // Add to term frequency with positional weight
+                    *term_frequency.entry(word.clone()).or_insert(0.0) += pos_weight;
+                    total_weighted_count += pos_weight;
+                    
+                    // Also add trimmed word variations with positional weight
+                    let trimmed_set = Self::generate_trimmed_word_set(&word);
+                    for trimmed in trimmed_set {
+                        *term_frequency.entry(trimmed).or_insert(0.0) += pos_weight * 0.3; // Reduced weight for trimmed words
+                        total_weighted_count += pos_weight * 0.3;
+                    }
+                }
+            }
+            
+            // Compute enhanced TF-IDF = (weighted TF) * IDF
+            for (word_or_trimmed, weighted_count) in term_frequency {
+                let tf = weighted_count / total_weighted_count.max(1.0);
+                let idf = if let Some(idf_val) = trimmed_idf_scores.get(&word_or_trimmed) {
+                    *idf_val
+                } else if let Some(idf_val) = self.idf_scores.get(&word_or_trimmed) {
+                    *idf_val
+                } else {
+                    0.0
+                };
+                enhanced_vector.insert(word_or_trimmed, tf * idf);
+            }
+            
+            self.tfidf_vectors_enhanced.push(enhanced_vector);
+            self.word_positions.push(word_pos_map);
+        }
     }
     
     /// Find similar contexts using TF-IDF cosine similarity (#2 preference)
