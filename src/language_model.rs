@@ -207,6 +207,32 @@ impl LanguageModel {
         variations
     }
     
+    /// Get the base stem of a word (removes common suffixes)
+    /// This normalizes "walked", "walking", "walks" all to "walk"
+    fn get_word_stem(word: &str) -> String {
+        let word_lower = word.to_lowercase();
+        
+        // Common English suffixes to try removing (longest first)
+        let suffixes = vec![
+            "ing", "ed", "er", "est", "ly", "s", "es", "ies", "ied", 
+            "tion", "sion", "ness", "ment", "able", "ible", "ful", "less",
+            "en", "ize", "ise", "ify", "ate"
+        ];
+        
+        // Try removing each suffix
+        for suffix in &suffixes {
+            if word_lower.len() > suffix.len() && word_lower.ends_with(suffix) {
+                let stem = word_lower[..word_lower.len() - suffix.len()].to_string();
+                if stem.len() >= 2 { // Only keep stems that are at least 2 characters
+                    return stem;
+                }
+            }
+        }
+        
+        // No suffix found, return original word
+        word_lower
+    }
+    
     /// Compute positional weight for a word based on its position in sentence
     /// Earlier positions get higher weights (more important)
     fn compute_positional_weight(position: usize, sentence_length: usize) -> f64 {
@@ -1254,8 +1280,21 @@ impl LanguageModel {
 
         // PRIMARY METHOD: TF-IDF/Cosine similarity-based sentence matching
         // Only use n-grams as fallback when similarity is too low
+        // Normalize context words to stems so "walked" and "walk" are treated the same
         let context_words: Vec<String> = context.iter()
-            .map(|t| self.extract_word(t).to_lowercase())
+            .map(|t| {
+                let word = self.extract_word(t).to_lowercase();
+                // Remove symbols and normalize to stem
+                let cleaned: String = word.chars()
+                    .filter(|c| c.is_alphanumeric() || *c == '\'')
+                    .collect();
+                if cleaned.is_empty() {
+                    word // Fallback to original if empty
+                } else {
+                    Self::get_word_stem(&cleaned) // Normalize to stem
+                }
+            })
+            .filter(|w| !w.is_empty() && !self.is_question_word(w) && !self.is_filler_word(w))
             .collect();
         
         // Get TF-IDF-based candidates (primary method):
