@@ -2033,7 +2033,9 @@ impl LanguageModel {
         
         // Also use context windows: find words that appear in similar contexts
         // This leverages the "last used" context information
+        // Use stems for lookup - try both original word and stem variations
         for query_word in &context_words {
+            // Try looking up with the stem (normalized word)
             if let Some(windows) = self.context_windows.get(query_word) {
                 for (before, after) in windows {
                     // Look for words that appear after this query word in training data
@@ -2041,7 +2043,15 @@ impl LanguageModel {
                     if !after.is_empty() {
                         for (idx, token) in after.iter().take(5).enumerate() {
                             let word = self.extract_word(token).to_lowercase();
-                            if !self.is_question_word(&word) && !context_words.contains(&word) {
+                            let cleaned: String = word.chars()
+                                .filter(|c| c.is_alphanumeric() || *c == '\'')
+                                .collect();
+                            let word_stem = if cleaned.is_empty() {
+                                word
+                            } else {
+                                Self::get_word_stem(&cleaned)
+                            };
+                            if !self.is_question_word(&word_stem) && !self.is_filler_word(&word_stem) && !context_words_stems.contains(&word_stem) {
                                 // Closer words get higher scores (more relevant)
                                 let proximity_score = (5 - idx) as u32;
                                 if let Some(existing) = candidates.iter_mut().find(|(w, _)| w == token) {
@@ -2058,11 +2068,51 @@ impl LanguageModel {
                         // Look at the last few words before
                         for token in before.iter().rev().take(2) {
                             let word = self.extract_word(token).to_lowercase();
-                            if !self.is_question_word(&word) && !context_words.contains(&word) {
+                            let cleaned: String = word.chars()
+                                .filter(|c| c.is_alphanumeric() || *c == '\'')
+                                .collect();
+                            let word_stem = if cleaned.is_empty() {
+                                word
+                            } else {
+                                Self::get_word_stem(&cleaned)
+                            };
+                            if !self.is_question_word(&word_stem) && !self.is_filler_word(&word_stem) && !context_words_stems.contains(&word_stem) {
                                 if let Some(existing) = candidates.iter_mut().find(|(w, _)| w == token) {
                                     existing.1 += 1;
                                 } else {
                                     candidates.push((token.clone(), 1));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            // Also try stem variations of the query word for context window lookup
+            let stem_variations = Self::generate_word_stem_variations(query_word);
+            for stem_var in stem_variations {
+                if stem_var != *query_word {
+                    if let Some(windows) = self.context_windows.get(&stem_var) {
+                        for (before, after) in windows {
+                            if !after.is_empty() {
+                                for (idx, token) in after.iter().take(5).enumerate() {
+                                    let word = self.extract_word(token).to_lowercase();
+                                    let cleaned: String = word.chars()
+                                        .filter(|c| c.is_alphanumeric() || *c == '\'')
+                                        .collect();
+                                    let word_stem = if cleaned.is_empty() {
+                                        word
+                                    } else {
+                                        Self::get_word_stem(&cleaned)
+                                    };
+                                    if !self.is_question_word(&word_stem) && !self.is_filler_word(&word_stem) && !context_words_stems.contains(&word_stem) {
+                                        let proximity_score = (5 - idx) as u32;
+                                        if let Some(existing) = candidates.iter_mut().find(|(w, _)| w == token) {
+                                            existing.1 += proximity_score;
+                                        } else {
+                                            candidates.push((token.clone(), proximity_score));
+                                        }
+                                    }
                                 }
                             }
                         }
