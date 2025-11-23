@@ -1701,13 +1701,19 @@ impl LanguageModel {
     fn find_similar_contexts(&self, query_words: &[String]) -> Vec<(usize, f64)> {
         let mut context_scores: HashMap<usize, f64> = HashMap::new();
         
-        // Normalize query words (lowercase, extract base word)
+        // Normalize query words (lowercase, extract base word, normalize to stems)
         // EXCLUDE question words from power set matching - they're wildcards
+        // Normalize to stems so "walked" and "walk" are treated the same
         let normalized_query: Vec<String> = query_words.iter()
             .map(|w| self.extract_word(w).to_lowercase())
             .map(|w: String| {
                 // Remove symbols - only keep alphanumeric and apostrophes
-                w.chars().filter(|c| c.is_alphanumeric() || *c == '\'').collect::<String>()
+                let cleaned: String = w.chars().filter(|c| c.is_alphanumeric() || *c == '\'').collect();
+                if cleaned.is_empty() {
+                    w // Fallback to original if empty
+                } else {
+                    Self::get_word_stem(&cleaned) // Normalize to stem
+                }
             })
             .filter(|w: &String| !w.is_empty()) // Skip empty words (symbols only)
             .filter(|w: &String| !self.is_question_word(w)) // Only use keywords, not question words
