@@ -2093,7 +2093,7 @@ impl LanguageModel {
             for stem_var in stem_variations {
                 if stem_var != *query_word {
                     if let Some(windows) = self.context_windows.get(&stem_var) {
-                        for (before, after) in windows {
+                        for (_before, after) in windows {
                             if !after.is_empty() {
                                 for (idx, token) in after.iter().take(5).enumerate() {
                                     let word = self.extract_word(token).to_lowercase();
@@ -2387,10 +2387,29 @@ impl LanguageModel {
                 let mut match_score = 0;
                 let mut answer_map: HashMap<usize, String> = HashMap::new();
                 
-                // Match word by word
+                // Match word by word (normalize to stems so "walk" matches "walked")
                 for (i, query_word) in query_words.iter().enumerate() {
                     let query_word_lower = query_word.to_lowercase();
+                    // Remove symbols and normalize to stem
+                    let query_cleaned: String = query_word_lower.chars()
+                        .filter(|c| c.is_alphanumeric() || *c == '\'')
+                        .collect();
+                    let query_stem = if query_cleaned.is_empty() {
+                        query_word_lower
+                    } else {
+                        Self::get_word_stem(&query_cleaned)
+                    };
+                    
                     let sentence_word = &sentence_words[start_idx + i];
+                    // Remove symbols and normalize to stem
+                    let sentence_cleaned: String = sentence_word.chars()
+                        .filter(|c| c.is_alphanumeric() || *c == '\'')
+                        .collect();
+                    let sentence_stem = if sentence_cleaned.is_empty() {
+                        sentence_word.clone()
+                    } else {
+                        Self::get_word_stem(&sentence_cleaned)
+                    };
                     
                     if wildcard_positions.contains(&i) {
                         // This is a wildcard position - capture everything until sentence end
@@ -2417,8 +2436,13 @@ impl LanguageModel {
                             match_score += 1;
                         }
                     } else {
-                        // This must match exactly (case-insensitive)
-                        if query_word_lower == *sentence_word {
+                        // Match using stems so "walk" matches "walked", "walking", etc.
+                        // Also filter out filler words - they don't need to match
+                        if self.is_filler_word(&query_stem) || self.is_filler_word(&sentence_stem) {
+                            // Filler words are optional - skip them
+                            continue;
+                        }
+                        if query_stem == sentence_stem {
                             match_score += 2; // Exact match gets higher score
                         } else {
                             matches = false;
