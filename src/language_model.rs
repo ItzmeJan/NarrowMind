@@ -679,16 +679,26 @@ impl LanguageModel {
             return Vec::new();
         }
         
-        // Separate question words (wildcards) from keywords (non-question words)
+        // Separate question words (wildcards) and filter out filler words from keywords
         let mut keywords: Vec<(usize, String)> = Vec::new();
         let mut has_question_words = false;
         
         for (pos, word) in query_words.iter().enumerate() {
             let normalized_word = self.extract_word(word).to_lowercase();
-            if self.is_question_word(&normalized_word) {
+            // Remove symbols - only keep alphanumeric and apostrophes
+            let cleaned_word: String = normalized_word.chars()
+                .filter(|c| c.is_alphanumeric() || *c == '\'')
+                .collect();
+            
+            if cleaned_word.is_empty() {
+                continue; // Skip empty words (symbols only)
+            }
+            
+            if self.is_question_word(&cleaned_word) {
                 has_question_words = true;
-            } else {
-                keywords.push((pos, normalized_word));
+            } else if !self.is_filler_word(&cleaned_word) {
+                // Only add non-filler keywords
+                keywords.push((pos, cleaned_word));
             }
         }
         
@@ -1575,6 +1585,18 @@ impl LanguageModel {
     fn is_question_word(&self, word: &str) -> bool {
         let question_words = vec!["who", "what", "where", "when", "why", "how", "which", "whose", "whom"];
         question_words.contains(&word.to_lowercase().as_str())
+    }
+    
+    /// Check if a word is a filler/stop word that should be ignored
+    /// These are common words that don't carry semantic meaning
+    fn is_filler_word(&self, word: &str) -> bool {
+        let filler_words = vec![
+            "did", "do", "does", "was", "were", "is", "are", "am", "be", "been", "being",
+            "have", "has", "had", "having", "the", "a", "an", "and", "or", "but", "if", "then",
+            "to", "from", "in", "on", "at", "by", "for", "with", "of", "as", "it", "its", "this", "that",
+            "these", "those", "i", "you", "he", "she", "we", "they", "me", "him", "her", "us", "them"
+        ];
+        filler_words.contains(&word.to_lowercase().as_str())
     }
 
     /// Set the temperature for sampling (controls randomness)
