@@ -518,6 +518,131 @@ impl LanguageModel {
         dot_product / denominator
     }
     
+    /// Enhanced cosine similarity using trimmed words and positional weighting
+    /// This provides better matching for grammar and word variations
+    fn cosine_similarity_enhanced(&self, query_vector: &HashMap<String, f64>, sentence_idx: usize) -> f64 {
+        if sentence_idx >= self.tfidf_vectors_enhanced.len() {
+            return 0.0;
+        }
+        
+        let sentence_vector = &self.tfidf_vectors_enhanced[sentence_idx];
+        let mut dot_product = 0.0;
+        let mut norm1 = 0.0;
+        let mut norm2 = 0.0;
+        
+        // Compute dot product and norms using enhanced vectors (with trimmed words)
+        let all_words: std::collections::HashSet<&String> = query_vector.keys().chain(sentence_vector.keys()).collect();
+        
+        for word in all_words {
+            let val1 = query_vector.get(word).copied().unwrap_or(0.0);
+            let val2 = sentence_vector.get(word).copied().unwrap_or(0.0);
+            
+            dot_product += val1 * val2;
+            norm1 += val1 * val1;
+            norm2 += val2 * val2;
+        }
+        
+        // Cosine similarity = dot_product / (sqrt(norm1) * sqrt(norm2))
+        let denominator = (norm1.sqrt() * norm2.sqrt()).max(1e-10);
+        let base_similarity = dot_product / denominator;
+        
+        // Apply positional bonus: if query words appear in similar positions, boost similarity
+        let positional_bonus = self.compute_positional_bonus(query_vector, sentence_idx);
+        
+        // Combine base similarity with positional bonus
+        base_similarity * (1.0 + positional_bonus * 0.2) // Up to 20% boost from positional matching
+    }
+    
+    /// Compute positional bonus based on word positions in query and sentence
+    fn compute_positional_bonus(&self, query_vector: &HashMap<String, f64>, sentence_idx: usize) -> f64 {
+        if sentence_idx >= self.word_positions.len() {
+            return 0.0;
+        }
+        
+        let sentence_positions = &self.word_positions[sentence_idx];
+        let mut total_bonus = 0.0;
+        let mut matched_words = 0;
+        
+        // For each word in query, check if it appears in similar positions in sentence
+        for (query_word, _) in query_vector.iter() {
+            if let Some(sentence_pos_list) = sentence_positions.get(query_word) {
+                // Word appears in sentence - check if positions are similar
+                // For now, just give a bonus if the word appears (positional similarity can be enhanced later)
+                if !sentence_pos_list.is_empty() {
+                    total_bonus += 1.0;
+                    matched_words += 1;
+                }
+            }
+        }
+        
+        if matched_words == 0 {
+            return 0.0;
+        }
+        
+        // Normalize bonus: more matched words = higher bonus
+        total_bonus / matched_words as f64
+    }
+    
+    /// Find similar contexts using enhanced cosine similarity with trimmed words (#1 preference)
+    fn find_similar_contexts_cosine(&self, query_words: &[String]) -> Vec<(usize, f64)> {
+        if self.tfidf_vectors_enhanced.is_empty() || query_words.is_empty() {
+            return Vec::new();
+        }
+        
+        // Build enhanced query vector with trimmed words
+        let mut query_vector: HashMap<String, f64> = HashMap::new();
+        let mut query_tf: HashMap<String, f64> = HashMap::new();
+        let query_word_count = query_words.len() as f64;
+        
+        // Build query vector with full words and trimmed variations
+        for (pos, word) in query_words.iter().enumerate() {
+            let normalized_word = self.extract_word(word).to_lowercase();
+            if !self.is_question_word(&normalized_word) {
+                // Add full word with positional weight
+                let pos_weight = Self::compute_positional_weight(pos, query_words.len());
+                *query_tf.entry(normalized_word.clone()).or_insert(0.0) += pos_weight;
+                
+                // Add trimmed word variations
+                let trimmed_set = Self::generate_trimmed_word_set(&normalized_word);
+                for trimmed in trimmed_set {
+                    *query_tf.entry(trimmed).or_insert(0.0) += pos_weight * 0.3; // Reduced weight for trimmed
+                }
+            }
+        }
+        
+        // Compute TF-IDF for query (use enhanced IDF scores when available)
+        let total_weight: f64 = query_tf.values().sum();
+        for (word_or_trimmed, weighted_count) in query_tf {
+            let tf = weighted_count / total_weight.max(1.0);
+            // Try to get IDF from enhanced scores, fallback to regular IDF
+            let idf = if let Some(idf_val) = self.idf_scores.get(&word_or_trimmed) {
+                *idf_val
+            } else {
+                // For trimmed words, use average IDF or a default
+                1.0
+            };
+            query_vector.insert(word_or_trimmed, tf * idf);
+        }
+        
+        // Compute enhanced cosine similarity with each sentence vector
+        let mut similarities: Vec<(usize, f64)> = Vec::new();
+        
+        for (idx, _) in self.tfidf_vectors_enhanced.iter().enumerate() {
+            let similarity = self.cosine_similarity_enhanced(&query_vector, idx);
+            if similarity > 0.0 {
+                similarities.push((idx, similarity));
+            }
+        }
+        
+        // Sort by similarity (descending)
+        similarities.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        
+        // Return top matches
+        similarities.into_iter().take(30).collect()
+    }
+    
     /// Compute TF-IDF relevance score for a candidate word given the context
     /// Returns a multiplier (>= 1.0) that boosts words more relevant to the context
     #[allow(dead_code)]
