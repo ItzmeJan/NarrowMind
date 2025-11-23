@@ -168,6 +168,45 @@ impl LanguageModel {
         trimmed_set
     }
     
+    /// Generate word stem variations by trimming common suffixes
+    /// This makes "walk", "walked", "walking" all match each other
+    /// Returns a set of stem variations (original word + stems with suffixes removed)
+    fn generate_word_stem_variations(word: &str) -> std::collections::HashSet<String> {
+        let mut variations = std::collections::HashSet::new();
+        let word_lower = word.to_lowercase();
+        
+        // Always include the original word
+        variations.insert(word_lower.clone());
+        
+        // Common English suffixes to try removing (longest first to avoid over-trimming)
+        let suffixes = vec![
+            "ing", "ed", "er", "est", "ly", "s", "es", "ies", "ied", 
+            "tion", "sion", "ness", "ment", "able", "ible", "ful", "less",
+            "en", "ize", "ise", "ify", "ate"
+        ];
+        
+        // Try removing each suffix
+        for suffix in &suffixes {
+            if word_lower.len() > suffix.len() && word_lower.ends_with(suffix) {
+                let stem = word_lower[..word_lower.len() - suffix.len()].to_string();
+                if stem.len() >= 2 { // Only keep stems that are at least 2 characters
+                    variations.insert(stem);
+                }
+            }
+        }
+        
+        // Also try adding common suffixes to see if we can match variations
+        // This helps "walk" match "walked" and "walking"
+        if word_lower.len() >= 3 {
+            for suffix in &["ed", "ing", "s", "er"] {
+                let variation = format!("{}{}", word_lower, suffix);
+                variations.insert(variation);
+            }
+        }
+        
+        variations
+    }
+    
     /// Compute positional weight for a word based on its position in sentence
     /// Earlier positions get higher weights (more important)
     fn compute_positional_weight(position: usize, sentence_length: usize) -> f64 {
@@ -425,11 +464,20 @@ impl LanguageModel {
                     *term_frequency.entry(word.clone()).or_insert(0.0) += pos_weight;
                     total_weighted_count += pos_weight;
                     
-                    // Also add trimmed word variations with positional weight
+                    // Add trimmed word variations (prefixes) with positional weight
                     let trimmed_set = Self::generate_trimmed_word_set(&word);
                     for trimmed in trimmed_set {
                         *term_frequency.entry(trimmed).or_insert(0.0) += pos_weight * 0.3; // Reduced weight for trimmed words
                         total_weighted_count += pos_weight * 0.3;
+                    }
+                    
+                    // Add word stem variations (suffix trimming) - makes "walk", "walked", "walking" match
+                    let stem_variations = Self::generate_word_stem_variations(&word);
+                    for stem in stem_variations {
+                        if stem != word { // Don't duplicate the original word
+                            *term_frequency.entry(stem).or_insert(0.0) += pos_weight * 0.5; // Medium weight for stem variations
+                            total_weighted_count += pos_weight * 0.5;
+                        }
                     }
                 }
             }
