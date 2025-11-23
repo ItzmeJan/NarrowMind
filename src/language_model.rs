@@ -1666,13 +1666,13 @@ impl LanguageModel {
         // EXCLUDE question words from power set matching - they're wildcards
         let normalized_query: Vec<String> = query_words.iter()
             .map(|w| self.extract_word(w).to_lowercase())
-            .map(|w| {
+            .map(|w: String| {
                 // Remove symbols - only keep alphanumeric and apostrophes
-                w.chars().filter(|c| c.is_alphanumeric() || *c == '\'').collect()
+                w.chars().filter(|c| c.is_alphanumeric() || *c == '\'').collect::<String>()
             })
-            .filter(|w| !w.is_empty()) // Skip empty words (symbols only)
-            .filter(|w| !self.is_question_word(w)) // Only use keywords, not question words
-            .filter(|w| !self.is_filler_word(w)) // Filter out filler words like "did", "was", etc.
+            .filter(|w: &String| !w.is_empty()) // Skip empty words (symbols only)
+            .filter(|w: &String| !self.is_question_word(w)) // Only use keywords, not question words
+            .filter(|w: &String| !self.is_filler_word(w)) // Filter out filler words like "did", "was", etc.
             .collect();
         
         if normalized_query.is_empty() {
