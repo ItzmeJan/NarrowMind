@@ -535,6 +535,7 @@ impl LanguageModel {
         }
         
         // Separate question words (wildcards) and filter out filler words from keywords
+        // Normalize keywords to stems so "walked" and "walk" are treated the same
         let mut keywords: Vec<String> = Vec::new();
         let mut has_question_words = false;
         
@@ -552,8 +553,9 @@ impl LanguageModel {
             if self.is_question_word(&cleaned_word) {
                 has_question_words = true;
             } else if !self.is_filler_word(&cleaned_word) {
-                // Only add non-filler keywords
-                keywords.push(cleaned_word);
+                // Normalize to stem so "walked" becomes "walk"
+                let stem = Self::get_word_stem(&cleaned_word);
+                keywords.push(stem);
             }
         }
         
