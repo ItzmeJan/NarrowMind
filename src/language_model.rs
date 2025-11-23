@@ -1236,51 +1236,64 @@ impl LanguageModel {
             return None;
         }
 
-        // HYBRID APPROACH: Combine sentence-based, direct continuations, and n-gram candidates
+        // PRIMARY METHOD: TF-IDF/Cosine similarity-based sentence matching
+        // Only use n-grams as fallback when similarity is too low
         let context_words: Vec<String> = context.iter()
             .map(|t| self.extract_word(t).to_lowercase())
             .collect();
         
-        // Get three types of candidates:
-        // 1. Sentence-based tokens (general matching)
-        let sentence_based_tokens = self.get_tokens_from_matching_sentences(&context_words);
-        
-        // 2. Direct sentence continuations (extract next word from matching sentences)
+        // Get TF-IDF-based candidates (primary method):
+        // 1. Direct sentence continuations (extract next word from matching sentences)
         let direct_continuations = self.get_direct_sentence_continuations(&context, &context_words);
         
-        // 3. N-gram candidates (sentence-filtered for better context relevance)
-        let ngram_candidates = self.get_sentence_filtered_ngrams(&context, &context_words, stop_at_sentence_end);
+        // 2. Sentence-based tokens (general matching)
+        let sentence_based_tokens = self.get_tokens_from_matching_sentences(&context_words);
         
-        // ADAPTIVE WEIGHTED COMBINATION: Dynamically adjust weights based on quality of matches
+        // Check similarity quality: get top matching sentences and their scores
+        let top_sentences = self.find_similar_contexts(&context_words);
+        let max_similarity = top_sentences.first().map(|(_, score)| *score).unwrap_or(0.0);
+        
+        // Threshold: only use n-grams if similarity is too low (< 5.0) or no good matches
+        let use_ngrams = max_similarity < 5.0 || (direct_continuations.is_empty() && sentence_based_tokens.is_empty());
+        
+        // Get n-gram candidates ONLY if needed (fallback)
+        let ngram_candidates = if use_ngrams {
+            self.get_sentence_filtered_ngrams(&context, &context_words, stop_at_sentence_end)
+        } else {
+            Vec::new()
+        };
+        
+        // ADAPTIVE WEIGHTED COMBINATION: Prioritize TF-IDF methods, n-grams only as fallback
         let mut combined_candidates: HashMap<String, f64> = HashMap::new();
         
-        // Calculate adaptive weights based on how many candidates we have from each source
+        // Calculate adaptive weights based on quality of matches
         let direct_count = direct_continuations.len();
         let sentence_count = sentence_based_tokens.len();
         let ngram_count = ngram_candidates.len();
         
-        // Adaptive weights: if we have good direct continuations, prioritize them more
+        // Adaptive weights: prioritize TF-IDF methods heavily
         let direct_weight = if direct_count > 0 {
-            0.6  // Higher weight when we have direct continuations
+            0.7  // Highest weight for direct continuations (most natural)
         } else {
             0.0
         };
         
         let sentence_weight = if sentence_count > 0 {
             if direct_count > 0 {
-                0.25  // Lower when we have direct continuations
+                0.3  // Lower when we have direct continuations
             } else {
-                0.5   // Higher when direct continuations are missing
+                0.8  // High when direct continuations are missing
             }
         } else {
             0.0
         };
         
-        let ngram_weight = if ngram_count > 0 {
+        // N-grams only get weight if TF-IDF methods failed or similarity is low
+        let ngram_weight = if use_ngrams && ngram_count > 0 {
             if direct_count > 0 || sentence_count > 0 {
-                0.15  // Lower when we have sentence-based sources
+                0.05  // Very low weight when we have TF-IDF sources (just smoothing)
             } else {
-                0.5   // Higher when sentence sources are missing
+                1.0   // Full weight only when TF-IDF completely fails
             }
         } else {
             0.0
@@ -1384,9 +1397,13 @@ impl LanguageModel {
             return self.select_from_continuations(&combined_vec, stop_at_sentence_end);
         }
         
-        // Fallback: If no sentence-filtered n-grams, try unfiltered multi-gram ensemble
-        // Use weighted combination from all n-gram sizes
-        let mut fallback_candidates: HashMap<String, f64> = HashMap::new();
+        // Fallback: Only use n-grams if TF-IDF methods completely failed
+        // This should rarely happen if similarity threshold is met
+        if !use_ngrams {
+            // TF-IDF methods should have worked, but if we still have no candidates, try n-grams as last resort
+            if combined_candidates.is_empty() {
+                // Last resort: unfiltered n-grams
+                let mut fallback_candidates: HashMap<String, f64> = HashMap::new();
         
         // Reuse context TF-IDF vector if available, otherwise compute it
         let fallback_context_vector = context_tfidf_vector.clone();
