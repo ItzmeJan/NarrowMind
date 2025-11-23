@@ -76,6 +76,8 @@ impl LanguageModel {
             tfidf_vectors: Vec::new(),
             idf_scores: HashMap::new(),
             total_sentences: 0,
+            tfidf_vectors_enhanced: Vec::new(),
+            word_positions: Vec::new(),
         }
     }
     
@@ -375,7 +377,7 @@ impl LanguageModel {
         let mut trimmed_idf_scores: HashMap<String, f64> = HashMap::new();
         
         // First pass: count document frequency for all trimmed words
-        for context in &self.contexts {
+        for _context in &self.contexts {
             let mut sentence_trimmed_words: std::collections::HashSet<String> = std::collections::HashSet::new();
             for token in &context.tokens {
                 let word = self.extract_word(token).to_lowercase();
@@ -592,7 +594,7 @@ impl LanguageModel {
         // Build enhanced query vector with trimmed words
         let mut query_vector: HashMap<String, f64> = HashMap::new();
         let mut query_tf: HashMap<String, f64> = HashMap::new();
-        let query_word_count = query_words.len() as f64;
+        let _query_word_count = query_words.len() as f64;
         
         // Build query vector with full words and trimmed variations
         for (pos, word) in query_words.iter().enumerate() {
@@ -716,7 +718,7 @@ impl LanguageModel {
         // Build enhanced context vector with trimmed words and positional info
         let mut enhanced_context_vector: HashMap<String, f64> = HashMap::new();
         let context_words: Vec<String> = context_vector.keys().cloned().collect();
-        let context_word_count = context_words.len() as f64;
+        let _context_word_count = context_words.len() as f64;
         
         // Build enhanced vector from context words
         for (pos, word) in context_words.iter().enumerate() {
@@ -1548,7 +1550,7 @@ impl LanguageModel {
             
             // Also add power set results if they exist (with lower weight)
             for (idx, power_score) in &scored_contexts {
-                if let Some(existing) = combined.iter_mut().find(|(i, _)| *i == idx) {
+                if let Some(existing) = combined.iter_mut().find(|(i, _)| *i == *idx) {
                     // Boost if both methods agree
                     existing.1 = existing.1.max(*power_score * 0.5);
                 } else {
