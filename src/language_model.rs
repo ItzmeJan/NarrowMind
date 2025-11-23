@@ -2436,12 +2436,16 @@ impl LanguageModel {
                             match_score += 1;
                         }
                     } else {
-                        // Match using stems so "walk" matches "walked", "walking", etc.
-                        // Also filter out filler words - they don't need to match
-                        if self.is_filler_word(&query_stem) || self.is_filler_word(&sentence_stem) {
-                            // Filler words are optional - skip them
+                        // Filler words are optional - they don't need to match exactly
+                        if self.is_filler_word(&query_stem) {
+                            // Query has filler word - it's optional, so continue (don't require match)
                             continue;
                         }
+                        if self.is_filler_word(&sentence_stem) {
+                            // Sentence has filler word but query doesn't - also optional, continue
+                            continue;
+                        }
+                        // Match using stems so "walk" matches "walked", "walking", etc.
                         if query_stem == sentence_stem {
                             match_score += 2; // Exact match gets higher score
                         } else {
