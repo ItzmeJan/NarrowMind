@@ -527,17 +527,27 @@ impl LanguageModel {
         }
         
         // Build query TF-IDF vector (ONLY from keywords, not question words)
+        // Include stem variations so "walk" matches "walked", "walking", etc.
         let mut query_vector: HashMap<String, f64> = HashMap::new();
-        let mut query_tf: HashMap<String, usize> = HashMap::new();
-        let keyword_count = keywords.len();
+        let mut query_tf: HashMap<String, f64> = HashMap::new();
         
         for word in &keywords {
-            *query_tf.entry(word.clone()).or_insert(0) += 1;
+            // Add full word
+            *query_tf.entry(word.clone()).or_insert(0.0) += 1.0;
+            
+            // Add word stem variations (suffix trimming) - makes "walk" match "walked", "walking"
+            let stem_variations = Self::generate_word_stem_variations(word);
+            for stem in stem_variations {
+                if stem != *word { // Don't duplicate the original word
+                    *query_tf.entry(stem).or_insert(0.0) += 0.5; // Medium weight for stem variations
+                }
+            }
         }
         
         // Compute TF-IDF for query
-        for (word, count) in query_tf {
-            let tf = count as f64 / keyword_count as f64;
+        let total_weight: f64 = query_tf.values().sum();
+        for (word, weighted_count) in query_tf {
+            let tf = weighted_count / total_weight.max(1.0);
             let idf = *self.idf_scores.get(&word).unwrap_or(&0.0);
             query_vector.insert(word, tf * idf);
         }
