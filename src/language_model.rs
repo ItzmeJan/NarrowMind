@@ -1974,14 +1974,28 @@ impl LanguageModel {
         
         // Extract words from similar contexts that could fill the wildcard
         // This adds additional context-aware scoring on top of sentence matching
+        // Normalize context_words to stems for comparison
+        let context_words_stems: Vec<String> = context_words.iter()
+            .map(|w| Self::get_word_stem(w))
+            .collect();
+        
         for (ctx_idx, score) in similar_contexts {
             if let Some(context) = self.contexts.get(ctx_idx) {
                 // Look for words in this context that appear near our context words
                 for (i, token) in context.tokens.iter().enumerate() {
                     let word = self.extract_word(token).to_lowercase();
+                    // Remove symbols and normalize to stem
+                    let cleaned: String = word.chars()
+                        .filter(|c| c.is_alphanumeric() || *c == '\'')
+                        .collect();
+                    let word_stem = if cleaned.is_empty() {
+                        word
+                    } else {
+                        Self::get_word_stem(&cleaned)
+                    };
                     
-                    // Skip if it's a question word or already in query
-                    if self.is_question_word(&word) || context_words.contains(&word) {
+                    // Skip if it's a question word, filler word, or already in query (compare stems)
+                    if self.is_question_word(&word_stem) || self.is_filler_word(&word_stem) || context_words_stems.contains(&word_stem) {
                         continue;
                     }
                     
