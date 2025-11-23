@@ -1249,8 +1249,10 @@ impl LanguageModel {
         let top_sentences = self.find_similar_contexts(&context_words);
         let max_similarity = top_sentences.first().map(|(_, score)| *score).unwrap_or(0.0);
         
-        // Threshold: only use n-grams if similarity is too low (< 5.0) or no good matches
-        let use_ngrams = max_similarity < 5.0 || (direct_continuations.is_empty() && sentence_based_tokens.is_empty());
+        // Threshold: only use n-grams if similarity is too low (< 1.0) or no good matches
+        // Cosine similarity scores are 0-1 range, scaled to 0-15, so 1.0 = ~0.067 raw similarity
+        // This ensures we prioritize TF-IDF/cosine when we have ANY reasonable match
+        let use_ngrams = max_similarity < 1.0 || (direct_continuations.is_empty() && sentence_based_tokens.is_empty());
         
         // Get n-gram candidates ONLY if needed (fallback)
         let ngram_candidates = if use_ngrams {
@@ -1629,15 +1631,17 @@ impl LanguageModel {
         let mut context_scores: HashMap<usize, f64> = HashMap::new();
         
         // Normalize query words (lowercase, extract base word)
+        // EXCLUDE question words from power set matching - they're wildcards
         let normalized_query: Vec<String> = query_words.iter()
             .map(|w| self.extract_word(w).to_lowercase())
+            .filter(|w| !self.is_question_word(w)) // Only use keywords, not question words
             .collect();
         
         if normalized_query.is_empty() {
             return Vec::new();
         }
         
-        // Generate power set: all possible subsets of query words
+        // Generate power set: all possible subsets of KEYWORDS only (no question words)
         let power_set = Self::generate_power_set(&normalized_query);
         
         // Score each sentence by counting how many subsets it matches
@@ -1680,7 +1684,9 @@ impl LanguageModel {
         // This provides better grammar matching and word similarity
         let cosine_results = self.find_similar_contexts_cosine(&normalized_query);
         
-        if !cosine_results.is_empty() && cosine_results[0].1 > 0.1 {
+        // Always prefer cosine similarity if we have any results (even low scores)
+        // The boost for question words makes even low similarities valuable
+        if !cosine_results.is_empty() {
             // Good matches found with enhanced cosine similarity - use them
             // Scale cosine scores to be comparable (multiply by 15 to match power set scale)
             let mut combined: Vec<(usize, f64)> = Vec::new();
