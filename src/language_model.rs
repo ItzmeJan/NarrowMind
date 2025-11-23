@@ -701,10 +701,16 @@ impl LanguageModel {
         let mut query_vector: HashMap<String, f64> = HashMap::new();
         let mut query_tf: HashMap<String, f64> = HashMap::new();
         
+        // Compute positional weights relative to keywords only (ignore wildcard positions)
+        // This makes "Where was Aria walking" and "Aria walked where" have same keyword positions
+        let keyword_count = keywords.len();
+        
         // Build query vector with full words and trimmed variations (keywords only)
-        for (pos, normalized_word) in &keywords {
-            // Add full word with positional weight
-            let pos_weight = Self::compute_positional_weight(*pos, query_words.len());
+        for (keyword_idx, (_, normalized_word)) in keywords.iter().enumerate() {
+            // Use keyword-relative position, not absolute position in query
+            // This ensures "Aria" and "walking" have same relative positions regardless of wildcard placement
+            let keyword_relative_pos = keyword_idx;
+            let pos_weight = Self::compute_positional_weight(keyword_relative_pos, keyword_count);
             *query_tf.entry(normalized_word.clone()).or_insert(0.0) += pos_weight;
             
             // Add trimmed word variations (prefixes)
