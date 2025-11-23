@@ -508,16 +508,26 @@ impl LanguageModel {
             return Vec::new();
         }
         
-        // Separate question words (wildcards) from keywords (non-question words)
+        // Separate question words (wildcards) and filter out filler words from keywords
         let mut keywords: Vec<String> = Vec::new();
         let mut has_question_words = false;
         
         for word in query_words {
             let normalized_word = self.extract_word(word).to_lowercase();
-            if self.is_question_word(&normalized_word) {
+            // Remove symbols - only keep alphanumeric and apostrophes
+            let cleaned_word: String = normalized_word.chars()
+                .filter(|c| c.is_alphanumeric() || *c == '\'')
+                .collect();
+            
+            if cleaned_word.is_empty() {
+                continue; // Skip empty words (symbols only)
+            }
+            
+            if self.is_question_word(&cleaned_word) {
                 has_question_words = true;
-            } else {
-                keywords.push(normalized_word);
+            } else if !self.is_filler_word(&cleaned_word) {
+                // Only add non-filler keywords
+                keywords.push(cleaned_word);
             }
         }
         
@@ -1656,14 +1666,20 @@ impl LanguageModel {
         // EXCLUDE question words from power set matching - they're wildcards
         let normalized_query: Vec<String> = query_words.iter()
             .map(|w| self.extract_word(w).to_lowercase())
+            .map(|w| {
+                // Remove symbols - only keep alphanumeric and apostrophes
+                w.chars().filter(|c| c.is_alphanumeric() || *c == '\'').collect()
+            })
+            .filter(|w| !w.is_empty()) // Skip empty words (symbols only)
             .filter(|w| !self.is_question_word(w)) // Only use keywords, not question words
+            .filter(|w| !self.is_filler_word(w)) // Filter out filler words like "did", "was", etc.
             .collect();
         
         if normalized_query.is_empty() {
             return Vec::new();
         }
         
-        // Generate power set: all possible subsets of KEYWORDS only (no question words)
+        // Generate power set: all possible subsets of KEYWORDS only (no question words, no filler words)
         let power_set = Self::generate_power_set(&normalized_query);
         
         // Score each sentence by counting how many subsets it matches
