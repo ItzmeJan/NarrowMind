@@ -1399,53 +1399,66 @@ impl LanguageModel {
         
         // Fallback: Only use n-grams if TF-IDF methods completely failed
         // This should rarely happen if similarity threshold is met
-        if !use_ngrams {
-            // TF-IDF methods should have worked, but if we still have no candidates, try n-grams as last resort
-            if combined_candidates.is_empty() {
-                // Last resort: unfiltered n-grams
-                let mut fallback_candidates: HashMap<String, f64> = HashMap::new();
-        
-        // Reuse context TF-IDF vector if available, otherwise compute it
-        let fallback_context_vector = context_tfidf_vector.clone();
-        let compute_fallback_tfidf_boost = |token: &str| -> f64 {
-            if let Some(ref context_vec) = fallback_context_vector {
-                self.compute_tfidf_relevance_with_vector(token, context_vec)
-            } else {
-                1.0
-            }
-        };
-        
-        for &ngram_size in &self.ngram_sizes {
-            let ngram_weight = *self.ngram_weights.get(&ngram_size).unwrap_or(&0.0);
-            if ngram_weight == 0.0 {
-                continue;
-            }
+        if combined_candidates.is_empty() && use_ngrams {
+            // Last resort: unfiltered n-grams (only when TF-IDF failed)
+            let mut fallback_candidates: HashMap<String, f64> = HashMap::new();
             
-            let ngram_contexts = match self.multi_ngram_contexts.get(&ngram_size) {
-                Some(ctx) => ctx,
-                None => continue,
+            // Reuse context TF-IDF vector if available
+            let fallback_context_vector = context_tfidf_vector.clone();
+            let compute_fallback_tfidf_boost = |token: &str| -> f64 {
+                if let Some(ref context_vec) = fallback_context_vector {
+                    self.compute_tfidf_relevance_with_vector(token, context_vec)
+                } else {
+                    1.0
+                }
             };
             
-            // Strategy 1: Try full n-gram context (n-1 tokens)
-            if context.len() >= ngram_size - 1 {
-                let context_key: Vec<String> = context[context.len().saturating_sub(ngram_size - 1)..].to_vec();
+            for &ngram_size in &self.ngram_sizes {
+                let ngram_weight = *self.ngram_weights.get(&ngram_size).unwrap_or(&0.0);
+                if ngram_weight == 0.0 {
+                    continue;
+                }
                 
-                if let Some(continuations) = ngram_contexts.get(&context_key) {
-                    for (token, count) in continuations {
-                        let tfidf_boost = compute_fallback_tfidf_boost(&token);
-                        *fallback_candidates.entry(token.clone()).or_insert(0.0) += (*count as f64) * ngram_weight * tfidf_boost;
+                let ngram_contexts = match self.multi_ngram_contexts.get(&ngram_size) {
+                    Some(ctx) => ctx,
+                    None => continue,
+                };
+                
+                // Strategy 1: Try full n-gram context (n-1 tokens)
+                if context.len() >= ngram_size - 1 {
+                    let context_key: Vec<String> = context[context.len().saturating_sub(ngram_size - 1)..].to_vec();
+                    
+                    if let Some(continuations) = ngram_contexts.get(&context_key) {
+                        for (token, count) in continuations {
+                            let tfidf_boost = compute_fallback_tfidf_boost(&token);
+                            *fallback_candidates.entry(token.clone()).or_insert(0.0) += (*count as f64) * ngram_weight * tfidf_boost;
+                        }
                     }
                 }
-            }
-            
-            // Strategy 2: Backoff to (n-2) context (if n > 2)
-            if fallback_candidates.is_empty() && ngram_size > 2 && context.len() >= ngram_size - 2 {
-                let context_key: Vec<String> = context[context.len().saturating_sub(ngram_size - 2)..].to_vec();
                 
-                for (ctx_key, continuations) in ngram_contexts {
-                    if ctx_key.len() >= context_key.len() {
-                        let ctx_suffix = &ctx_key[ctx_key.len() - context_key.len()..];
-                        if ctx_suffix == context_key.as_slice() {
+                // Strategy 2: Backoff to (n-2) context (if n > 2)
+                if fallback_candidates.is_empty() && ngram_size > 2 && context.len() >= ngram_size - 2 {
+                    let context_key: Vec<String> = context[context.len().saturating_sub(ngram_size - 2)..].to_vec();
+                    
+                    for (ctx_key, continuations) in ngram_contexts {
+                        if ctx_key.len() >= context_key.len() {
+                            let ctx_suffix = &ctx_key[ctx_key.len() - context_key.len()..];
+                            if ctx_suffix == context_key.as_slice() {
+                                for (token, count) in continuations {
+                                    let tfidf_boost = compute_fallback_tfidf_boost(&token);
+                                    *fallback_candidates.entry(token.clone()).or_insert(0.0) += (*count as f64) * ngram_weight * tfidf_boost;
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Strategy 3: Backoff to bigram (last token only)
+                if fallback_candidates.is_empty() && context.len() >= 1 {
+                    let last_token = &context[context.len() - 1];
+                    
+                    for (ctx_key, continuations) in ngram_contexts {
+                        if !ctx_key.is_empty() && ctx_key[ctx_key.len() - 1] == *last_token {
                             for (token, count) in continuations {
                                 let tfidf_boost = compute_fallback_tfidf_boost(&token);
                                 *fallback_candidates.entry(token.clone()).or_insert(0.0) += (*count as f64) * ngram_weight * tfidf_boost;
@@ -1455,32 +1468,19 @@ impl LanguageModel {
                 }
             }
             
-            // Strategy 3: Backoff to bigram (last token only)
-            if fallback_candidates.is_empty() && context.len() >= 1 {
-                let last_token = &context[context.len() - 1];
-                
-                for (ctx_key, continuations) in ngram_contexts {
-                    if !ctx_key.is_empty() && ctx_key[ctx_key.len() - 1] == *last_token {
-                        for (token, count) in continuations {
-                            let tfidf_boost = compute_fallback_tfidf_boost(&token);
-                            *fallback_candidates.entry(token.clone()).or_insert(0.0) += (*count as f64) * ngram_weight * tfidf_boost;
-                        }
-                    }
-                }
+            if !fallback_candidates.is_empty() {
+                let fallback_vec: Vec<(String, u32)> = fallback_candidates
+                    .into_iter()
+                    .map(|(token, score)| (token, score as u32))
+                    .collect();
+                return self.select_from_continuations(&fallback_vec, stop_at_sentence_end);
             }
-        }
-        
-        if !fallback_candidates.is_empty() {
-            let fallback_vec: Vec<(String, u32)> = fallback_candidates
-                .into_iter()
-                .map(|(token, score)| (token, score as u32))
-                .collect();
-            return self.select_from_continuations(&fallback_vec, stop_at_sentence_end);
         }
 
         // Strategy 4: Final backoff to unigram (most frequent words overall)
         // This uses Laplace smoothing - all words have at least a small probability
-        if !self.unigram_counts.is_empty() {
+        // Only use if TF-IDF methods completely failed
+        if !self.unigram_counts.is_empty() && combined_candidates.is_empty() {
             let unigram_candidates: Vec<(String, u32)> = self.unigram_counts
                 .iter()
                 .map(|(token, count)| (token.clone(), *count))
