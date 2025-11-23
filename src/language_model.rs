@@ -33,6 +33,9 @@ pub struct LanguageModel {
     tfidf_vectors: Vec<HashMap<String, f64>>, // TF-IDF vectors for each sentence
     idf_scores: HashMap<String, f64>, // Inverse document frequency for each word
     total_sentences: usize, // Total number of sentences for IDF calculation
+    // Enhanced TF-IDF with trimmed words and positional info
+    tfidf_vectors_enhanced: Vec<HashMap<String, f64>>, // Enhanced TF-IDF vectors with trimmed words
+    word_positions: Vec<HashMap<String, Vec<usize>>>, // Word -> positions in sentence for each context
 }
 
 impl LanguageModel {
