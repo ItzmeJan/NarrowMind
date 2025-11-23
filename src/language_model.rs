@@ -674,14 +674,66 @@ impl LanguageModel {
     }
     
     /// Optimized version that uses a pre-computed context TF-IDF vector
+    /// NOW USES ENHANCED COSINE SIMILARITY with trimmed words and positional info
     fn compute_tfidf_relevance_with_vector(&self, candidate_word: &str, context_vector: &HashMap<String, f64>) -> f64 {
-        if self.tfidf_vectors.is_empty() {
-            return 1.0;
+        if self.tfidf_vectors_enhanced.is_empty() {
+            // Fallback to regular TF-IDF if enhanced vectors not available
+            if self.tfidf_vectors.is_empty() {
+                return 1.0;
+            }
+            // Use old method as fallback
+            let candidate_word_lower = self.extract_word(candidate_word).to_lowercase();
+            let mut total_similarity = 0.0;
+            let mut sentence_count = 0;
+            let candidate_idf = *self.idf_scores.get(&candidate_word_lower).unwrap_or(&0.0);
+            
+            if let Some(sentence_indices) = self.word_to_contexts.get(&candidate_word_lower) {
+                for &sentence_idx in sentence_indices.iter().take(10) {
+                    if let Some(sentence_vector) = self.tfidf_vectors.get(sentence_idx) {
+                        let similarity = self.cosine_similarity(context_vector, sentence_vector);
+                        if similarity > 0.0 {
+                            total_similarity += similarity;
+                            sentence_count += 1;
+                        }
+                    }
+                }
+            }
+            
+            let avg_similarity = if sentence_count > 0 {
+                total_similarity / sentence_count as f64
+            } else {
+                0.0
+            };
+            
+            let normalized_idf = (candidate_idf / 6.0).min(1.0).max(0.0);
+            let similarity_boost = 1.0 + avg_similarity;
+            let idf_boost = 1.0 + (normalized_idf * 0.5);
+            return similarity_boost * idf_boost;
         }
         
         let candidate_word_lower = self.extract_word(candidate_word).to_lowercase();
         
-        // Find sentences containing the candidate word and compute average similarity
+        // Build enhanced context vector with trimmed words and positional info
+        let mut enhanced_context_vector: HashMap<String, f64> = HashMap::new();
+        let context_words: Vec<String> = context_vector.keys().cloned().collect();
+        let context_word_count = context_words.len() as f64;
+        
+        // Build enhanced vector from context words
+        for (pos, word) in context_words.iter().enumerate() {
+            let pos_weight = Self::compute_positional_weight(pos, context_words.len());
+            let base_tfidf = *context_vector.get(word).unwrap_or(&0.0);
+            
+            // Add full word with positional weight
+            *enhanced_context_vector.entry(word.clone()).or_insert(0.0) += base_tfidf * pos_weight;
+            
+            // Add trimmed word variations
+            let trimmed_set = Self::generate_trimmed_word_set(word);
+            for trimmed in trimmed_set {
+                *enhanced_context_vector.entry(trimmed).or_insert(0.0) += base_tfidf * pos_weight * 0.3;
+            }
+        }
+        
+        // Find sentences containing the candidate word and compute average enhanced similarity
         let mut total_similarity = 0.0;
         let mut sentence_count = 0;
         
@@ -691,8 +743,8 @@ impl LanguageModel {
         // Find sentences that contain the candidate word
         if let Some(sentence_indices) = self.word_to_contexts.get(&candidate_word_lower) {
             for &sentence_idx in sentence_indices.iter().take(10) { // Limit to top 10 for efficiency
-                if let Some(sentence_vector) = self.tfidf_vectors.get(sentence_idx) {
-                    let similarity = self.cosine_similarity(context_vector, sentence_vector);
+                if sentence_idx < self.tfidf_vectors_enhanced.len() {
+                    let similarity = self.cosine_similarity_enhanced(&enhanced_context_vector, sentence_idx);
                     if similarity > 0.0 {
                         total_similarity += similarity;
                         sentence_count += 1;
@@ -702,7 +754,7 @@ impl LanguageModel {
         }
         
         // Compute relevance score:
-        // 1. Average similarity with sentences containing the candidate (0-1 range)
+        // 1. Average enhanced similarity with sentences containing the candidate (0-1 range)
         // 2. IDF score of candidate (normalized, 0-1 range)
         // Combine them for a relevance multiplier
         
@@ -718,7 +770,7 @@ impl LanguageModel {
         
         // Relevance multiplier: 
         // - Base: 1.0 (no boost)
-        // - Similarity boost: up to 2.0x for high similarity
+        // - Enhanced similarity boost: up to 2.0x for high similarity (better grammar matching)
         // - IDF boost: up to 1.5x for important/rare words
         // Combined: 1.0 to ~3.5x multiplier
         let similarity_boost = 1.0 + avg_similarity; // 1.0 to 2.0
