@@ -1722,10 +1722,23 @@ impl LanguageModel {
         let power_set = Self::generate_power_set(&normalized_query);
         
         // Score each sentence by counting how many subsets it matches
+        // Normalize sentence words to stems so "walked" matches "walk"
         for (ctx_idx, context) in self.contexts.iter().enumerate() {
-            // Extract all words from this sentence (normalized)
+            // Extract all words from this sentence (normalized to stems)
             let sentence_words: Vec<String> = context.tokens.iter()
-                .map(|t| self.extract_word(t).to_lowercase())
+                .map(|t| {
+                    let word = self.extract_word(t).to_lowercase();
+                    // Remove symbols and normalize to stem
+                    let cleaned: String = word.chars()
+                        .filter(|c| c.is_alphanumeric() || *c == '\'')
+                        .collect();
+                    if cleaned.is_empty() {
+                        word // Fallback to original if empty
+                    } else {
+                        Self::get_word_stem(&cleaned) // Normalize to stem
+                    }
+                })
+                .filter(|w| !w.is_empty() && !self.is_question_word(w) && !self.is_filler_word(w))
                 .collect();
             
             // Count how many subsets from power set appear in this sentence
