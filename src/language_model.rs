@@ -377,7 +377,7 @@ impl LanguageModel {
         let mut trimmed_idf_scores: HashMap<String, f64> = HashMap::new();
         
         // First pass: count document frequency for all trimmed words
-        for _context in &self.contexts {
+        for context in &self.contexts {
             let mut sentence_trimmed_words: std::collections::HashSet<String> = std::collections::HashSet::new();
             for token in &context.tokens {
                 let word = self.extract_word(token).to_lowercase();
