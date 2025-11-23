@@ -1480,14 +1480,40 @@ impl LanguageModel {
             b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
         });
         
-        // #1 PREFERENCE: Power set matching - if we found good matches, use them
-        if !scored_contexts.is_empty() && scored_contexts[0].1 > 1.0 {
-            // Good matches found with power set - return them
-            return scored_contexts.into_iter().take(30).collect();
+        // #1 PREFERENCE: Enhanced cosine similarity with trimmed words and positional info
+        // This provides better grammar matching and word similarity
+        let cosine_results = self.find_similar_contexts_cosine(&normalized_query);
+        
+        if !cosine_results.is_empty() && cosine_results[0].1 > 0.1 {
+            // Good matches found with enhanced cosine similarity - use them
+            // Scale cosine scores to be comparable (multiply by 15 to match power set scale)
+            let mut combined: Vec<(usize, f64)> = Vec::new();
+            
+            for (idx, cosine_score) in cosine_results {
+                let scaled_score = cosine_score * 15.0;
+                combined.push((idx, scaled_score));
+            }
+            
+            // Also add power set results if they exist (with lower weight)
+            for (idx, power_score) in &scored_contexts {
+                if let Some(existing) = combined.iter_mut().find(|(i, _)| *i == idx) {
+                    // Boost if both methods agree
+                    existing.1 = existing.1.max(*power_score * 0.5);
+                } else {
+                    combined.push((*idx, *power_score * 0.3)); // Lower weight for power set alone
+                }
+            }
+            
+            // Sort and return top matches
+            combined.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            
+            return combined.into_iter().take(30).collect();
         }
         
         // #2 PREFERENCE: Fallback to TF-IDF vector similarity
-        // Use when power set matching doesn't find strong matches
+        // Use when enhanced cosine similarity doesn't find strong matches
         let tfidf_results = self.find_similar_contexts_tfidf(&normalized_query);
         
         if !tfidf_results.is_empty() {
