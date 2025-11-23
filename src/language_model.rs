@@ -697,10 +697,18 @@ impl LanguageModel {
             let pos_weight = Self::compute_positional_weight(*pos, query_words.len());
             *query_tf.entry(normalized_word.clone()).or_insert(0.0) += pos_weight;
             
-            // Add trimmed word variations
+            // Add trimmed word variations (prefixes)
             let trimmed_set = Self::generate_trimmed_word_set(normalized_word);
             for trimmed in trimmed_set {
                 *query_tf.entry(trimmed).or_insert(0.0) += pos_weight * 0.3; // Reduced weight for trimmed
+            }
+            
+            // Add word stem variations (suffix trimming) - makes "walk" match "walked", "walking"
+            let stem_variations = Self::generate_word_stem_variations(normalized_word);
+            for stem in stem_variations {
+                if stem != *normalized_word { // Don't duplicate the original word
+                    *query_tf.entry(stem).or_insert(0.0) += pos_weight * 0.5; // Medium weight for stem variations
+                }
             }
         }
         
