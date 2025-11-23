@@ -454,26 +454,42 @@ impl LanguageModel {
     
     /// Find similar contexts using TF-IDF cosine similarity (#2 preference)
     /// Falls back to this when power set matching (#1) doesn't find good matches
+    /// Question words are treated as wildcards - they match any word, so similarity is based on keywords only
     fn find_similar_contexts_tfidf(&self, query_words: &[String]) -> Vec<(usize, f64)> {
         if self.tfidf_vectors.is_empty() || query_words.is_empty() {
             return Vec::new();
         }
         
-        // Build query TF-IDF vector
-        let mut query_vector: HashMap<String, f64> = HashMap::new();
-        let mut query_tf: HashMap<String, usize> = HashMap::new();
-        let query_word_count = query_words.len();
+        // Separate question words (wildcards) from keywords (non-question words)
+        let mut keywords: Vec<String> = Vec::new();
+        let mut has_question_words = false;
         
         for word in query_words {
             let normalized_word = self.extract_word(word).to_lowercase();
-            if !self.is_question_word(&normalized_word) {
-                *query_tf.entry(normalized_word).or_insert(0) += 1;
+            if self.is_question_word(&normalized_word) {
+                has_question_words = true;
+            } else {
+                keywords.push(normalized_word);
             }
+        }
+        
+        // If no keywords, can't match anything
+        if keywords.is_empty() {
+            return Vec::new();
+        }
+        
+        // Build query TF-IDF vector (ONLY from keywords, not question words)
+        let mut query_vector: HashMap<String, f64> = HashMap::new();
+        let mut query_tf: HashMap<String, usize> = HashMap::new();
+        let keyword_count = keywords.len();
+        
+        for word in &keywords {
+            *query_tf.entry(word.clone()).or_insert(0) += 1;
         }
         
         // Compute TF-IDF for query
         for (word, count) in query_tf {
-            let tf = count as f64 / query_word_count as f64;
+            let tf = count as f64 / keyword_count as f64;
             let idf = *self.idf_scores.get(&word).unwrap_or(&0.0);
             query_vector.insert(word, tf * idf);
         }
@@ -482,9 +498,22 @@ impl LanguageModel {
         let mut similarities: Vec<(usize, f64)> = Vec::new();
         
         for (idx, sentence_vector) in self.tfidf_vectors.iter().enumerate() {
-            let similarity = self.cosine_similarity(&query_vector, sentence_vector);
-            if similarity > 0.0 {
-                similarities.push((idx, similarity));
+            let base_similarity = self.cosine_similarity(&query_vector, sentence_vector);
+            
+            if base_similarity > 0.0 {
+                // If query has question words (wildcards), boost similarity significantly
+                // Question words mean we're looking for answers, so good keyword matches are more valuable
+                // The sentence similarity score matters a lot for question-answer matching
+                let boosted_similarity = if has_question_words {
+                    // Strong boost when question words are present (they're wildcards, so matches are more relevant)
+                    // Scale boost based on similarity: higher similarity = higher boost (up to 3x)
+                    let boost_factor = 1.0 + (base_similarity * 2.0); // 1.0 to 3.0x boost
+                    base_similarity * boost_factor
+                } else {
+                    base_similarity
+                };
+                
+                similarities.push((idx, boosted_similarity));
             }
         }
         
@@ -586,29 +615,44 @@ impl LanguageModel {
     }
     
     /// Find similar contexts using enhanced cosine similarity with trimmed words (#1 preference)
+    /// Question words are treated as wildcards - they match any word, so similarity is based on keywords only
     fn find_similar_contexts_cosine(&self, query_words: &[String]) -> Vec<(usize, f64)> {
         if self.tfidf_vectors_enhanced.is_empty() || query_words.is_empty() {
             return Vec::new();
         }
         
-        // Build enhanced query vector with trimmed words
-        let mut query_vector: HashMap<String, f64> = HashMap::new();
-        let mut query_tf: HashMap<String, f64> = HashMap::new();
-        let _query_word_count = query_words.len() as f64;
+        // Separate question words (wildcards) from keywords (non-question words)
+        let mut keywords: Vec<(usize, String)> = Vec::new();
+        let mut has_question_words = false;
         
-        // Build query vector with full words and trimmed variations
         for (pos, word) in query_words.iter().enumerate() {
             let normalized_word = self.extract_word(word).to_lowercase();
-            if !self.is_question_word(&normalized_word) {
-                // Add full word with positional weight
-                let pos_weight = Self::compute_positional_weight(pos, query_words.len());
-                *query_tf.entry(normalized_word.clone()).or_insert(0.0) += pos_weight;
-                
-                // Add trimmed word variations
-                let trimmed_set = Self::generate_trimmed_word_set(&normalized_word);
-                for trimmed in trimmed_set {
-                    *query_tf.entry(trimmed).or_insert(0.0) += pos_weight * 0.3; // Reduced weight for trimmed
-                }
+            if self.is_question_word(&normalized_word) {
+                has_question_words = true;
+            } else {
+                keywords.push((pos, normalized_word));
+            }
+        }
+        
+        // If no keywords, can't match anything
+        if keywords.is_empty() {
+            return Vec::new();
+        }
+        
+        // Build enhanced query vector with trimmed words (ONLY from keywords, not question words)
+        let mut query_vector: HashMap<String, f64> = HashMap::new();
+        let mut query_tf: HashMap<String, f64> = HashMap::new();
+        
+        // Build query vector with full words and trimmed variations (keywords only)
+        for (pos, normalized_word) in &keywords {
+            // Add full word with positional weight
+            let pos_weight = Self::compute_positional_weight(*pos, query_words.len());
+            *query_tf.entry(normalized_word.clone()).or_insert(0.0) += pos_weight;
+            
+            // Add trimmed word variations
+            let trimmed_set = Self::generate_trimmed_word_set(normalized_word);
+            for trimmed in trimmed_set {
+                *query_tf.entry(trimmed).or_insert(0.0) += pos_weight * 0.3; // Reduced weight for trimmed
             }
         }
         
@@ -630,9 +674,22 @@ impl LanguageModel {
         let mut similarities: Vec<(usize, f64)> = Vec::new();
         
         for (idx, _) in self.tfidf_vectors_enhanced.iter().enumerate() {
-            let similarity = self.cosine_similarity_enhanced(&query_vector, idx);
-            if similarity > 0.0 {
-                similarities.push((idx, similarity));
+            let base_similarity = self.cosine_similarity_enhanced(&query_vector, idx);
+            
+            if base_similarity > 0.0 {
+                // If query has question words (wildcards), boost similarity significantly
+                // Question words mean we're looking for answers, so good keyword matches are more valuable
+                // The sentence similarity score matters a lot for question-answer matching
+                let boosted_similarity = if has_question_words {
+                    // Strong boost when question words are present (they're wildcards, so matches are more relevant)
+                    // Scale boost based on similarity: higher similarity = higher boost (up to 3x)
+                    let boost_factor = 1.0 + (base_similarity * 2.0); // 1.0 to 3.0x boost
+                    base_similarity * boost_factor
+                } else {
+                    base_similarity
+                };
+                
+                similarities.push((idx, boosted_similarity));
             }
         }
         
