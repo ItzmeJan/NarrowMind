@@ -403,7 +403,7 @@ impl LanguageModel {
         self.tfidf_vectors_enhanced.clear();
         self.word_positions.clear();
         
-        for (ctx_idx, context) in self.contexts.iter().enumerate() {
+        for (_ctx_idx, context) in self.contexts.iter().enumerate() {
             let mut enhanced_vector: HashMap<String, f64> = HashMap::new();
             let mut word_pos_map: HashMap<String, Vec<usize>> = HashMap::new();
             let sentence_length = context.tokens.len();
