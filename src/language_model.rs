@@ -124,7 +124,58 @@ impl LanguageModel {
             tfidf_vectors: Vec::new(),
             idf_scores: HashMap::new(),
             total_sentences: 0,
+            tfidf_vectors_enhanced: Vec::new(),
+            word_positions: Vec::new(),
         }
+    }
+
+    /// Generate trimmed word sets (2-4 characters) with different cases
+    /// Returns a set of all possible trimmed variations of a word
+    fn generate_trimmed_word_set(word: &str) -> std::collections::HashSet<String> {
+        let mut trimmed_set = std::collections::HashSet::new();
+        let word_lower = word.to_lowercase();
+        let word_upper = word.to_uppercase();
+        let word_title = if !word.is_empty() {
+            let mut chars = word.chars();
+            if let Some(first) = chars.next() {
+                format!("{}{}", first.to_uppercase(), chars.as_str().to_lowercase())
+            } else {
+                word.to_string()
+            }
+        } else {
+            word.to_string()
+        };
+        
+        // Generate trimmed versions for each case
+        for case_word in &[word_lower.as_str(), word_upper.as_str(), word_title.as_str()] {
+            let len = case_word.len();
+            if len >= 2 {
+                // 2-char prefix
+                trimmed_set.insert(case_word.chars().take(2).collect());
+            }
+            if len >= 3 {
+                // 3-char prefix
+                trimmed_set.insert(case_word.chars().take(3).collect());
+            }
+            if len >= 4 {
+                // 4-char prefix
+                trimmed_set.insert(case_word.chars().take(4).collect());
+            }
+        }
+        
+        trimmed_set
+    }
+    
+    /// Compute positional weight for a word based on its position in sentence
+    /// Earlier positions get higher weights (more important)
+    fn compute_positional_weight(position: usize, sentence_length: usize) -> f64 {
+        if sentence_length == 0 {
+            return 1.0;
+        }
+        // Normalize position to 0-1 range (0 = start, 1 = end)
+        let normalized_pos = position as f64 / sentence_length as f64;
+        // Earlier words get higher weight: 1.0 at start, 0.5 at end
+        1.0 - (normalized_pos * 0.5)
     }
 
     pub fn train(&mut self, text: &str) {
